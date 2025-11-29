@@ -59,3 +59,11 @@ Scan the QR code with the Expo Go app on your phone.
 Shake the phone to reload if needed.
 
 Login and start scanning!
+
+----------------------------------------------------
+
+cd D:\Projects\auth-checker
+git status
+git add .
+git commit -m "Your update message"
+git push
