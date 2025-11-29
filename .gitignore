@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+env/
+venv/
+.venv/
+*.sqlite3
+*.log
+
+# Node / Expo / React Native
+node_modules/
+.expo/
+web-build/
+dist/
+
+# Secrets & configs
+.env
+.env.* 
+*.key
+*.pem
+
+# Uploads, model weights, debug outputs
+backend/uploads/
+ml/model/
+ml/inference/*.pth
+backend/ocr_debug/
+/uploads/
+*.sqlite
+
+# OS
+.DS_Store
+Thumbs.db
