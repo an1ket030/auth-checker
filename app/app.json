@@ -22,7 +22,7 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "package": "com.authchecker.app",
+      "package": "com.student.authchecker.demo",
       "permissions": [
         "CAMERA",
         "READ_EXTERNAL_STORAGE",

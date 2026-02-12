@@ -14,6 +14,7 @@ class Users(Base):
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String, unique=True, index=True)
     email = Column(String, unique=True, index=True)
+    password_hash = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class ValidMedicine(Base):
@@ -25,6 +26,11 @@ class ValidMedicine(Base):
     expiry_date = Column(DateTime)
     mrp = Column(Float)
     packaging_hash = Column(String)
+    serial_number = Column(String, unique=True, index=True) # Anti-replay: unique per unit
+    
+    # -- Anti-Cloning / Supply Chain --
+    scan_count = Column(Integer, default=0)
+    last_scanned_at = Column(DateTime, nullable=True)
 
 class ScanHistory(Base):
     __tablename__ = "scan_history"

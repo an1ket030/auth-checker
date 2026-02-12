@@ -12,7 +12,9 @@ from paddleocr import PaddleOCR
 from thefuzz import fuzz
 
 # Initialize PaddleOCR
-ocr_engine = PaddleOCR(use_angle_cls=True, lang='en')
+# Initialize PaddleOCR with safe defaults
+# disable mkldnn to avoid fused_conv2d errors on some windows machines
+ocr_engine = PaddleOCR(use_angle_cls=True, lang='en', use_gpu=False, enable_mkldnn=False)
 
 class InferenceEngine:
     def __init__(self, model_path=None, debug_dir="ocr_debug"):
@@ -105,77 +107,68 @@ class InferenceEngine:
             return None
 
     def extract_text(self, image_bytes, known_batches=[], debug_name="img"):
-        """Extract text with fallback methods"""
+        """
+        ENSEMBLE OCR STRATEGY:
+        Run BOTH Tesseract and PaddleOCR (Safe Mode).
+        Combine results and check all candidates.
+        """
         try:
-            print(f"\n[SCAN] Starting OCR for {debug_name}")
+            print(f"\n[SCAN] Starting ENSEMBLE OCR for {debug_name}")
             
-            # Try original image first
-            print("Attempt 1: Original image")
-            img1 = self.preprocess_image(image_bytes)
-            
-            if img1 is not None:
-                try:
-                    print(f"  → Image shape: {img1.shape}, dtype: {img1.dtype}")
-                    result1 = ocr_engine.ocr(img1)
-                    # debug: save raw result
-                    print("OCR raw output (attempt1):", repr(result1))
-                    with open(os.path.join(self.debug_dir, f"{debug_name}_ocr_raw_attempt1.txt"), "w", encoding="utf-8") as f:
-                        f.write(repr(result1))
-                    print(f"  → Raw result type: {type(result1)}, length: {len(result1) if result1 else 0}")
-                    texts1 = self._parse_ocr_result(result1)
-                    print(f"  → Detected {len(texts1)} text segments")
-                    
-                    if len(texts1) > 5:  # If we got good results, use them
-                        return self._extract_batch_from_texts(texts1, known_batches)
-                except Exception as e:
-                    print(f"  → Failed: {e}")
+            detected_texts = []
+            full_text_combined = ""
 
-            # Try enhanced preprocessing
-            print("Attempt 2: Enhanced preprocessing")
-            img2 = self.preprocess_image_enhanced(image_bytes)
-            
-            if img2 is not None:
-                try:
-                    print(f"  → Image shape: {img2.shape}, dtype: {img2.dtype}")
-                    result2 = ocr_engine.ocr(img2)
-                    print("OCR raw output (attempt2):", repr(result2))
-                    with open(os.path.join(self.debug_dir, f"{debug_name}_ocr_raw_attempt2.txt"), "w", encoding="utf-8") as f:
-                        f.write(repr(result2))
-                    print(f"  → Raw result type: {type(result2)}, length: {len(result2) if result2 else 0}")
-                    texts2 = self._parse_ocr_result(result2)
-                    print(f"  → Detected {len(texts2)} text segments")
-                    
-                    if len(texts2) > 0:
-                        return self._extract_batch_from_texts(texts2, known_batches)
-                except Exception as e:
-                    print(f"  → Failed: {e}")
+            # 1. Preprocess Image
+            img = self.preprocess_image(image_bytes)
+            if img is None:
+                 return {"full_text": "Image Error", "batch_number": "UNKNOWN"}
 
-            # Try aggressive preprocessing
-            print("Attempt 3: Aggressive preprocessing")
-            img3 = self.preprocess_image_aggressive(image_bytes)
-            
-            if img3 is not None:
-                try:
-                    print(f"  → Image shape: {img3.shape}, dtype: {img3.dtype}")
-                    result3 = ocr_engine.ocr(img3)
-                    print("OCR raw output (attempt3):", repr(result3))
-                    with open(os.path.join(self.debug_dir, f"{debug_name}_ocr_raw_attempt3.txt"), "w", encoding="utf-8") as f:
-                        f.write(repr(result3))
-                    print(f"  → Raw result type: {type(result3)}, length: {len(result3) if result3 else 0}")
-                    texts3 = self._parse_ocr_result(result3)
-                    print(f"  → Detected {len(texts3)} text segments")
-                    
-                    if len(texts3) > 0:
-                        return self._extract_batch_from_texts(texts3, known_batches)
-                except Exception as e:
-                    print(f"  → Failed: {e}")
+            # --- ENGINE A: TESSERACT ---
+            print("--- Running Engine A: Tesseract ---")
+            try:
+                import pytesseract
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                # Use a reliable config
+                text_tess = pytesseract.image_to_string(gray, config=r'--oem 3 --psm 6')
+                if text_tess.strip():
+                    print(f"  → Tesseract found: {len(text_tess)} chars")
+                    full_text_combined += text_tess + "\n"
+                    detected_texts.extend([l.strip() for l in text_tess.split('\n') if len(l.strip())>2])
+            except Exception as e:
+                print(f"  → Tesseract failed: {e}")
 
-            print("All OCR attempts failed")
-            return {"full_text": "OCR Error", "batch_number": "UNKNOWN"}
+            # --- ENGINE B: PADDLEOCR (Safe Mode) ---
+            print("--- Running Engine B: PaddleOCR (Safe Mode) ---")
+            try:
+                # Paddle expect BGR image
+                result_paddle = ocr_engine.ocr(img)
+                texts_paddle = self._parse_ocr_result(result_paddle)
+                if texts_paddle:
+                     print(f"  → Paddle found: {len(texts_paddle)} segments")
+                     detected_texts.extend(texts_paddle)
+                     full_text_combined += " ".join(texts_paddle) + "\n"
+            except Exception as e:
+                print(f"  → Paddle failed: {e}")
+
+            # 3. Deduplicate and Extract
+            detected_texts = list(set(detected_texts))
+            print(f"  → Total combined unique lines: {len(detected_texts)}")
+            
+            if detected_texts:
+                result = self._extract_batch_from_texts(detected_texts, known_batches)
+                result["full_text"] = full_text_combined
+                return result
+
+            return {"full_text": full_text_combined or "OCR Error", "batch_number": "UNKNOWN"}
 
         except Exception as e:
-            print(f"[ERROR] Unhandled exception: {e}")
-            traceback.print_exc()
+            err_msg = f"[ERROR] Unhandled exception: {e}\n{traceback.format_exc()}"
+            print(err_msg)
+            try:
+                with open("debug_ocr.log", "a", encoding="utf-8") as log:
+                    log.write(f"\nCRITICAL OCR ERROR:\n{err_msg}\n")
+            except:
+                pass
             return {"full_text": "Processing Error", "batch_number": "UNKNOWN"}
 
     def _parse_ocr_result(self, result):
@@ -258,17 +251,30 @@ class InferenceEngine:
                             return {"full_text": clean_text, "batch_number": extracted_batch}
 
             # attempt combined token e.g. 'B.No.EA25049' or 'B.NO.25238MPUL'
-            combined_match = re.search(r'\b(?:B|B\.|B\.?NO|BNO|BATCH)[\.\s:\/\-]*(.+)', text, flags=re.I)
+            combined_match = re.search(r'\b(?:B|B\.|B\.?NO|BNO|BATCH)[\.\s:\/\-]*([^\s]+)', text, flags=re.I)
             if combined_match:
                 tail = combined_match.group(1)
+                
+                # STOP at common keywords if they were glued (e.g. EA25049MFD)
+                stop_pattern = re.search(r'(MFD|MFG|EXP|MRP|DAT|DT|\*)', tail, flags=re.I)
+                if stop_pattern:
+                    tail = tail[:stop_pattern.start()]
+
                 # sanitize: keep alnum and hyphen only
                 candidate = re.sub(r'[^A-Z0-9\-]', '', tail.upper() if isinstance(tail, str) else str(tail).upper())
+                
+                # STRIP leading "NO", "N0", "0" from the candidate itself
+                # This handles cases where regex captured "NOEA25..."
+                candidate = re.sub(r'^(NO|N0|0|O)+', '', candidate)
+
                 # ignore pure words and tokens w/out digits
-                if candidate and re.search(r'\d{2,}', candidate) and not any(tok in candidate for tok in IGNORE_TOKENS):
+                if candidate and re.search(r'\d', candidate) and not any(tok in candidate for tok in IGNORE_TOKENS):
                     # if trailing month letters were glued, strip trailing alpha sequences after digits
                     candidate = re.sub(r'([0-9]+)[A-Z]+$', r'\1', candidate)
                     candidate = candidate.strip().strip(".-")
-                    if len(candidate) >= 3:
+                    
+                    # Sanity check length (Batches usually 4-12 chars)
+                    if 3 <= len(candidate) <= 15:
                         print(f"[Strategy 0b improved] Found combined keyword+value: {candidate}")
                         return {"full_text": clean_text, "batch_number": candidate}
         
@@ -316,11 +322,13 @@ class InferenceEngine:
                 print(f"[Strategy 2] Fuzzy match: {best_match} ({best_ratio}%)")
                 return {"full_text": clean_text, "batch_number": best_match}
 
-        # STRATEGY 3: Pattern matching
+        # STRATEGY 3: Pattern matching (Stricter)
         patterns = [
-            r'(?:^|\s)([A-Z]{2,4}[0-9]{3,6})(?:\s|$)',
-            r'(?:^|\s)([0-9]{6,8})(?:\s|$)',
-            r'(?:^|\s)([A-Z][0-9]{4,7})(?:\s|$)',
+            # Require at least 2 letters, 4+ digits, and avoid common words
+            # e.g. AB123456, but not "TABLET" (which matches [A-Z]{2,}[0-9] in some loose regex)
+            r'(?:^|\s)([A-Z]{2,4}[0-9]{4,8})(?:\s|$)', 
+            # Pure numeric batch (rare but possible, usually long)
+            r'(?:^|\s)([0-9]{7,10})(?:\s|$)',
         ]
         
         for pattern in patterns:
@@ -333,10 +341,22 @@ class InferenceEngine:
                     print(f"[Strategy 3] Pattern match: {extracted_batch}")
                     return {"full_text": clean_text, "batch_number": extracted_batch}
 
+        # STRATEGY 4: Serial Number Extraction
+        # Look for SN, S/N, Serial, etc.
+        match_sn = re.search(
+            r'(?:SN|S\.?N|SERIAL|UID)[\s\.:\-]*([A-Z0-9]{3,20})',
+            clean_text,
+            flags=re.I
+        )
+        extracted_sn = None
+        if match_sn:
+            extracted_sn = match_sn.group(1).strip().strip(".-")
+            print(f"[Strategy 4] Serial match: {extracted_sn}")
+
         print(f"[No match] Returning UNKNOWN")
         return {
             "full_text": clean_text if clean_text else "NO_TEXT_DETECTED",
-            "batch_number": "UNKNOWN"
+            "batch_number": "UNKNOWN",
         }
 
     def compare_visuals(self, image_bytes, reference_vector_str):

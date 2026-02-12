@@ -20,16 +20,108 @@ from PIL import Image
 from pyzbar.pyzbar import decode as pyzbar_decode
 
 from .database import engine, get_db, Base
+from .database import engine, get_db, Base
 from .models import ValidMedicine, ScanHistory, ScanStatus, Users
+
+# Security Imports
+from passlib.context import CryptContext
+from jose import jwt, JWTError
+from datetime import datetime, timedelta
+from fastapi.security import OAuth2PasswordBearer
+from fastapi import Request
+
+# Rate Limiting
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+limiter = Limiter(key_func=get_remote_address)
+
+# SECURITY CONFIG
+SECRET_KEY = os.getenv("SECRET_KEY", "supersecretkey123") # Change in prod
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 600
+
+# pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+from passlib.hash import pbkdf2_sha256
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+def verify_password(plain_password, hashed_password):
+    print(f"DEBUG: verify_password called")
+    try:
+        return pbkdf2_sha256.verify(plain_password, hashed_password)
+    except Exception as e:
+        print(f"DEBUG: verify_password FAILED: {e}")
+        return False
+
+def get_password_hash(password):
+    return pbkdf2_sha256.hash(password)
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    credentials_exception = HTTPException(
+        status_code=401,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    user = db.query(Users).filter(Users.username == username).first()
+    if user is None:
+        raise credentials_exception
+    return user
 
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from ml.inference.engine import InferenceEngine  # your existing OCR wrapper
 
 # Force table creation (models must match DB; migrations preferred)
+# Force table creation (models must match DB; migrations preferred)
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="AuthChecker Production API")
+
+# -- Background Cleanup Task --
+import asyncio
+import time
+
+async def cleanup_old_uploads():
+    """Delete files in uploads/ older than 24 hours."""
+    while True:
+        try:
+            upload_dir = "uploads"
+            if os.path.exists(upload_dir):
+                now = time.time()
+                for f in os.listdir(upload_dir):
+                    fpath = os.path.join(upload_dir, f)
+                    if os.path.isfile(fpath):
+                        # Delete if older than 24h (86400 seconds)
+                        if os.stat(fpath).st_mtime < now - 86400:
+                            os.remove(fpath)
+                            print(f"[Cleanup] Deleted old file: {f}")
+            await asyncio.sleep(3600) # Check every hour
+        except Exception as e:
+            print(f"[Cleanup Error]: {e}")
+            await asyncio.sleep(3600)
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(cleanup_old_uploads())
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,16 +131,49 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Add Rate Limiter Exception Handler
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 ml_engine = InferenceEngine()
+
+from pydantic import BaseModel, validator, EmailStr
 
 # ---- Pydantic models ----
 class UserLogin(BaseModel):
     username: str
+    password: str
+
+class UserRegister(BaseModel):
+    username: str
     email: str
+    password: str
+
+    @validator("email")
+    def validate_email(cls, v):
+        # Basic regex or use EmailStr if email-validator installed
+        # Using regex for dependency-free robustness
+        pattern = r"^[\w\.-]+@[\w\.-]+\.\w+$"
+        if not re.match(pattern, v):
+            raise ValueError("Invalid email format")
+        return v
+
+    @validator("password")
+    def validate_password(cls, v):
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters long")
+        if not re.search(r"[0-9]", v):
+            raise ValueError("Password must contain at least one number")
+        return v
 
 class UserResponse(BaseModel):
     id: int
+class UserResponse(BaseModel):
+    id: int
     username: str
+    email: str
+    access_token: str
+    token_type: str
 
 class HistoryItem(BaseModel):
     product: str
@@ -73,34 +198,26 @@ def normalize_batch(raw: Optional[str]) -> Optional[str]:
         return None
     s = str(raw).upper().strip()
 
-    # Remove common prefixes like BATCH, B.NO, BNO etc.
+    # 1. Remove standard prefixes (spaced or dotted)
+    #    MATCH: BATCH, B.NO, BNO, B-NO etc.
     s = re.sub(r'^\s*(BATCH|B\.?NO\.?|BNO|B[\.\s]?NO[:\.\s-]*)\s*', '', s, flags=re.I)
 
-    # Remove leading 'NO' artifact (if exact letters). Keep this AFTER the prefix removal above.
-    s = re.sub(r'^\s*NO(?=[A-Z0-9])', '', s, flags=re.I)
+    # 2. Aggressive Glue Removal:
+    #    OCR often reads "B.No.XY123" as "NOXY123" or "0XY123" or "N0XY123"
+    #    Remove leading "NO", "N0", "0", "O" if followed by letters/digits
+    #    Repeat loop to catch multiple layers like "NON0..."
+    for _ in range(3):
+        s = re.sub(r'^(NO|N0|0|O)(?=[A-Z0-9])', '', s, flags=re.I)
 
-    # Remove common non-alnum characters but keep hyphen and slash (some batches use them)
+    # 3. Remove non-alnum (keep hyphen/slash)
     s = re.sub(r'[^A-Z0-9\-\/]', '', s)
 
-    # --- Heuristic corrections for OCR confusions ---
-    # 1) Leading "N0" (N + zero) often should be "NO" (N + letter O)
-    if s.startswith('N0'):
-        s = 'NO' + s[2:]
-
-    # 2) Leading zero followed by a letter (e.g. "0YMS..." which likely was "OYMS...") -> replace leading 0 -> O
-    s = re.sub(r'^0(?=[A-Z])', 'O', s)
-
-    # 3) Replace occurrences of 'N0' when followed by letters (covers glued forms like 'N0YMS2584')
-    s = re.sub(r'N0(?=[A-Z])', 'NO', s)
-
-    # Keep only A-Z,0-9 and - / now (again, defensive)
-    s = re.sub(r'[^A-Z0-9\-\/]', '', s)
-
-    # require at least 2 digits in the candidate (basic sanity)
-    if not re.search(r'\d{2,}', s):
+    # 4. Require at least 3 digits (stricter sanity)
+    #    Real batches usually have 4-10 chars.
+    if len(s) < 3: 
         return None
-
-    return s if s else None
+        
+    return s
 
 
 def extract_dates_from_text(full_text: str):
@@ -177,15 +294,16 @@ def compute_trust_score(evidence: dict):
     manufacturer_verified = bool(evidence.get('manufacturer_verified', False))
     registry = bool(evidence.get('pharma_registry_match', False))
 
-    # Adjusted weights: smaller penalty for missing packaging_sim
+    # Adjusted weights: verified batch is the critical factor
     weights = {
-        'product_matched': 0.30,
-        'batch_in_db': 0.35,
-        'mfg_exp_valid': 0.12,
-        'ocr_confidence': 0.08,
+        'product_matched': 0.20,
+        'batch_in_db': 0.50, # Critical factor
+        'mfg_exp_valid': 0.10,
+        'ocr_confidence': 0.05,
         'packaging_sim': 0.05,
         'manufacturer_verified': 0.05,
-        'registry': 0.05
+        'registry': 0.05,
+        'serial_valid': 0.0 # treated as bonus now
     }
 
     s_product = 1.0 if product_matched else 0.0
@@ -195,6 +313,14 @@ def compute_trust_score(evidence: dict):
     s_pack = max(0.0, min(1.0, packaging_sim))
     s_mfg = 1.0 if manufacturer_verified else 0.0
     s_reg = 1.0 if registry else 0.0
+    
+    # Serial Logic: 
+    s_serial = 0.0
+    if evidence.get('serial_valid'):
+        if evidence.get('serial_is_clone', False):
+             s_serial = -1.0
+        else:
+             s_serial = 1.0
 
     raw = (weights['product_matched']*s_product +
            weights['batch_in_db']*s_batch +
@@ -202,17 +328,34 @@ def compute_trust_score(evidence: dict):
            weights['ocr_confidence']*s_ocr +
            weights['packaging_sim']*s_pack +
            weights['manufacturer_verified']*s_mfg +
-           weights['registry']*s_reg)
-    max_w = sum(weights.values())
+           weights['registry']*s_reg +
+           0.20*max(0, s_serial)) # Bonus 20% for serial
+           
+    max_w = sum(weights.values()) + 0.20
     normalized = (raw / max_w) * 100.0
 
-    positive_count = sum([s_product>0, s_batch>0, s_dates>0, s_ocr>0.6, s_pack>0.6, s_mfg>0, s_reg>0])
+    # BATCH OVERRIDE: If batch is in DB, it is AUTHENTIC
+    if batch_in_db:
+        normalized = max(normalized, 96.0)
 
-    if normalized >= 80 and (s_product or s_batch or s_mfg or s_reg):
-        label = ScanStatus.AUTHENTIC.value
-    elif normalized >= 50 and positive_count >= 2:
+    # SERIAL OVERRIDE: If serial is valid, ensure AUTHENTIC
+    if s_serial == 1.0:
+        normalized = max(normalized, 99.0)
+    
+    # CLONE OVERRIDE: If serial is clone, force SUSPICIOUS or FAKE
+    if s_serial == -1.0:
+        normalized = 0.0
         label = ScanStatus.SUSPICIOUS.value
-    elif normalized >= 30 and positive_count >= 1:
+        return {'score': 0.0, 'label': label, 'breakdown': {'cloned_serial': True}}
+
+    positive_count = sum([s_product>0, s_batch>0, s_dates>0, s_ocr>0.5, s_pack>0.5, s_mfg>0, s_reg>0])
+    
+    # UNIFIED THRESHOLD: 75%
+    if normalized >= 75:
+        label = ScanStatus.AUTHENTIC.value
+    elif normalized >= 40 and positive_count >= 1:
+        label = ScanStatus.SUSPICIOUS.value
+    elif normalized >= 20:
         label = "UNKNOWN"
     else:
         label = ScanStatus.FAKE.value
@@ -225,6 +368,7 @@ def compute_trust_score(evidence: dict):
         'packaging_sim': round(s_pack, 3),
         'manufacturer_verified': s_mfg,
         'registry': s_reg,
+        'serial_valid': s_serial,
         'raw_score': raw,
         'normalized': round(normalized, 2),
         'positive_count': int(positive_count)
@@ -284,36 +428,64 @@ def decode_barcode_from_bytes(image_bytes: bytes):
         return []
 
 # ---- Routes ----
-@app.post("/api/v1/login", response_model=UserResponse)
-def login_user(user: UserLogin, db: Session = Depends(get_db)):
-    db_user = db.query(Users).filter(Users.email == user.email).first()
-    if not db_user:
-        db_user = Users(username=user.username, email=user.email)
-        db.add(db_user)
-        db.commit()
-        db.refresh(db_user)
-    return {"id": db_user.id, "username": db_user.username}
+@app.post("/api/v1/register", response_model=UserResponse)
+@limiter.limit("5/minute") # Rate limit: 5 per minute per IP
+def register_user(request: Request, user: UserRegister, db: Session = Depends(get_db)):
+    db_user = db.query(Users).filter(Users.username == user.username).first()
+    if db_user:
+        raise HTTPException(status_code=400, detail="Username already registered")
+    
+    hashed_password = get_password_hash(user.password)
+    new_user = Users(username=user.username, email=user.email, password_hash=hashed_password)
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    
+    access_token = create_access_token(data={"sub": new_user.username})
+    return {
+        "id": new_user.id, 
+        "username": new_user.username, 
+        "email": new_user.email,
+        "access_token": access_token,
+        "token_type": "bearer"
+    }
 
-@app.get("/api/v1/history/{user_id}", response_model=List[HistoryItem])
-def get_history(user_id: int, db: Session = Depends(get_db)):
+@app.post("/api/v1/login", response_model=UserResponse)
+@limiter.limit("10/minute") # Slightly higher for login
+def login_user(request: Request, user: UserLogin, db: Session = Depends(get_db)):
+    # Try finding by username OR email (if user sends email as username)
+    db_user = db.query(Users).filter((Users.username == user.username) | (Users.email == user.username)).first()
+    if not db_user or not verify_password(user.password, db_user.password_hash):
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
+    
+    access_token = create_access_token(data={"sub": db_user.username})
+    return {
+        "id": db_user.id, 
+        "username": db_user.username,
+        "email": db_user.email,
+        "access_token": access_token, 
+        "token_type": "bearer"
+    }
+
+@app.get("/api/v1/history", response_model=List[HistoryItem])
+def get_history(current_user: Users = Depends(get_current_user), db: Session = Depends(get_db)):
     """
     Return the 10 most recent scans for user_id.
     Compute status deterministically from authenticity_score to avoid mismatches.
     """
-    scans = db.query(ScanHistory).filter(ScanHistory.user_id == user_id).order_by(ScanHistory.scanned_at.desc()).limit(10).all()
+    scans = db.query(ScanHistory).filter(ScanHistory.user_id == current_user.id).order_by(ScanHistory.scanned_at.desc()).limit(10).all()
     results = []
     for s in scans:
         # Use the stored authenticity_score as the canonical value
         score = float(s.authenticity_score) if s.authenticity_score is not None else 0.0
 
         # Determine label deterministically (mirror compute_trust_score thresholds)
-        if score >= 80:
+        # UNIFIED THRESHOLD: 75%
+        if score >= 75:
             label = ScanStatus.AUTHENTIC.value
-        elif score >= 60:
-            label = ScanStatus.AUTHENTIC.value   # keep 60+ as AUTHENTIC (adjust if you use 80+)
         elif score >= 50:
             label = ScanStatus.SUSPICIOUS.value
-        elif score >= 30:
+        elif score >= 25:
             label = "UNKNOWN"
         else:
             label = ScanStatus.FAKE.value
@@ -334,10 +506,12 @@ def get_history(user_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/api/v1/scan")
+@limiter.limit("20/minute") # Allow frequent scanning but prevent abuse
 async def scan_medicine(
-    user_id: int,
+    request: Request,
     file: UploadFile = File(...),
     barcode: Optional[str] = Form(None),   # client may supply barcode separately
+    current_user: Users = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -346,9 +520,22 @@ async def scan_medicine(
       - barcode (optional): barcode string scanned on device (helps when barcode region is separate)
     """
     try:
+        # Validate file size (max 5MB)
+        file.file.seek(0, 2)
+        file_size = file.file.tell()
+        file.file.seek(0)
+        
+        if file_size > 5 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="File too large (max 5MB)")
+            
+        # Validate extension
+        filename = file.filename.lower()
+        if not filename.endswith(('.jpg', '.jpeg', '.png', '.webp')):
+             raise HTTPException(status_code=400, detail="Invalid file type. Only JPG, PNG, WEBP allowed.")
+
         # save uploaded image
         file_id = str(uuid.uuid4())
-        file_ext = file.filename.split(".")[-1] if file.filename else "jpg"
+        file_ext = filename.split(".")[-1]
         file_path = f"uploads/{file_id}.{file_ext}"
         os.makedirs("uploads", exist_ok=True)
         with open(file_path, "wb") as buffer:
@@ -357,15 +544,35 @@ async def scan_medicine(
         with open(file_path, "rb") as img_file:
             image_bytes = img_file.read()
 
-        # 1) OCR
+        # 1) OCR (Synchronous to avoid thread safety issues with PaddleOCR)
+        # from fastapi.concurrency import run_in_threadpool
+        # ocr_result = await run_in_threadpool(ml_engine.extract_text, image_bytes)
+        
         ocr_result = ml_engine.extract_text(image_bytes)
+        
         detected_batch_raw = ocr_result.get("batch_number")
+        detected_serial_raw = ocr_result.get("serial_number") # Capture SN
         full_text_raw = ocr_result.get("full_text", "") or ""
-        print(f"[DEBUG] OCR detected_batch_raw={detected_batch_raw!r}")
+        
+        # LOGGING FOR DEBUGGING
+        try:
+            with open("debug_ocr.log", "a", encoding="utf-8") as log:
+                log.write(f"\n--- SCAN {datetime.now()} ---\n")
+                log.write(f"Image Size: {len(image_bytes)} bytes\n")
+                log.write(f"Raw Text:\n{full_text_raw}\n")
+                log.write(f"Detected Batch Raw: {detected_batch_raw}\n")
+                log.write(f"Detected Serial Raw: {detected_serial_raw}\n")
+        except Exception as log_err:
+            print(f"Logging failed: {log_err}")
+
+        print(f"[DEBUG] OCR detected_batch_raw={detected_batch_raw!r}, SN={detected_serial_raw!r}")
 
         # Normalize batch
         normalized_batch = normalize_batch(detected_batch_raw)
         print(f"[DEBUG] normalized_batch={normalized_batch!r}")
+        
+        with open("debug_ocr.log", "a", encoding="utf-8") as log:
+             log.write(f"Normalized Batch: {normalized_batch}\n")
 
         # default evidence
         evidence = {
@@ -375,7 +582,9 @@ async def scan_medicine(
             'ocr_confidence': 0.0,
             'packaging_sim': 0.0,
             'manufacturer_verified': False,
-            'pharma_registry_match': False
+            'manufacturer_verified': False,
+            'pharma_registry_match': False,
+            'serial_valid': False
         }
 
         # 2) barcode decode from image (if client did not supply)
@@ -520,6 +729,39 @@ async def scan_medicine(
             evidence['product_matched'] = True
             print(f"[DEBUG] golden_record found: {golden_record.batch_number} -> {golden_record.brand_name}")
 
+        # 4.5) Check Serial Number logic
+        if detected_serial_raw:
+            # Clean it
+            sn_clean = re.sub(r'[^A-Z0-9]', '', detected_serial_raw.upper())
+            # Check DB
+            med_by_sn = db.query(ValidMedicine).filter(ValidMedicine.serial_number == sn_clean).first()
+            if med_by_sn:
+                print(f"[DEBUG] Valid Serial Number found: {sn_clean}")
+                evidence['serial_valid'] = True
+                
+                # Check CLONE status
+                # If scanned > 10 times, flag it
+                old_count = med_by_sn.scan_count or 0
+                if old_count > 10:
+                    print(f"[WARN] Serial {sn_clean} scanned {old_count} times! Possible Clone.")
+                    evidence['serial_is_clone'] = True
+                
+                # Update Scan Count (Increment)
+                try:
+                    med_by_sn.scan_count = old_count + 1
+                    med_by_sn.last_scanned_at = datetime.utcnow()
+                    db.commit()
+                except Exception as e:
+                    print(f"[DB Error] Failed to update scan count: {e}")
+                    db.rollback()
+
+                # If we didn't have a golden record before, we do now
+                if not golden_record:
+                    golden_record = med_by_sn
+                    evidence['product_matched'] = True
+            else:
+                print(f"[DEBUG] Unknown Serial Number: {sn_clean}")
+
         # 5) extract & validate dates
         mfg_date, exp_date = extract_dates_from_text(full_text_raw)
         evidence['mfg_exp_valid'] = mfg_exp_valid(mfg_date, exp_date)
@@ -542,7 +784,7 @@ async def scan_medicine(
 
         # Persist scan history
         scan = ScanHistory(
-            user_id=user_id,
+            user_id=current_user.id,
             scanned_batch_number=normalize_batch(detected_batch_raw) or (detected_batch_raw or "UNKNOWN"),
             authenticity_score=score,
             status=final_status,
@@ -560,9 +802,11 @@ async def scan_medicine(
 
         return {
             "status": final_status,
+            "label": final_status, # Frontend expects label
             "score": score,
             "reason": reason,
-            "product": product_name
+            "product": product_name,
+            "breakdown": res['breakdown']
         }
 
     except Exception as e:
