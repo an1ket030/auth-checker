@@ -12,7 +12,8 @@
       "backgroundColor": "#ffffff"
     },
     "assetBundlePatterns": [
-      "**/*"
+      "**/*",
+      "assets/*"
     ],
     "ios": {
       "supportsTablet": true
@@ -27,22 +28,21 @@
         "CAMERA",
         "READ_EXTERNAL_STORAGE",
         "WRITE_EXTERNAL_STORAGE",
-        "INTERNET"
+        "INTERNET",
+        "android.permission.CAMERA"
       ]
     },
     "plugins": [
-      [
-        "expo-build-properties",
-        {
-          "android": {
-            "usesCleartextTraffic": true
-          }
-        }
-      ],
-      "expo-barcode-scanner"
+      "expo-asset",
+      "expo-font"
     ],
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "171e8b31-db16-4be9-bdc4-24ba5c64a56a"
+      }
     }
   }
 }

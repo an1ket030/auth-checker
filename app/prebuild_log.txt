@@ -1,0 +1,21 @@
+! Git branch has uncommited file changes
+› It's recommended to commit all changes before proceeding in case you want to revert generated changes.
+Git status is dirty but the command will continue because the terminal is not interactive.
+- Clearing android
+√ Cleared android code
+- Creating native directory (./android)
+√ Created native directory
+- Updating package.json
+√ Updated package.json | no changes
+- Running prebuild
+× Prebuild failed
+Error: [android.dangerous]: withAndroidDangerousBaseMod: Crc error - 30002249 - 627115888
+Error: [android.dangerous]: withAndroidDangerousBaseMod: Crc error - 30002249 - 627115888
+    at n._parseChunkEnd (D:\Projects\auth-checker\app\node_modules\jimp-compact\dist\jimp.js:1:514593)
+    at e.process (D:\Projects\auth-checker\app\node_modules\jimp-compact\dist\jimp.js:1:40580)
+    at t.exports (D:\Projects\auth-checker\app\node_modules\jimp-compact\dist\jimp.js:1:419827)
+    at e.read [as image/png] (D:\Projects\auth-checker\app\node_modules\jimp-compact\dist\jimp.js:1:1865)
+    at Jimp.parseBitmap (D:\Projects\auth-checker\app\node_modules\jimp-compact\dist\jimp.js:1:125704)
+    at Jimp.parseBitmap (D:\Projects\auth-checker\app\node_modules\jimp-compact\dist\jimp.js:1:8514)
+    at D:\Projects\auth-checker\app\node_modules\jimp-compact\dist\jimp.js:1:7613
+    at FSReqCallback.readFileAfterClose [as oncomplete] (node:internal/fs/read/context:68:3)

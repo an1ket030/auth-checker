@@ -1,0 +1,31 @@
+Starting Metro Bundler
+warning: Bundler cache is empty, rebuilding (this may take a minute)
+Android Bundling failed 15630ms node_modules\expo\AppEntry.js (824 modules)
+Error: Unable to resolve module crypto from D:\Projects\auth-checker\app\node_modules\axios\dist\node\axios.cjs: crypto could not be found within the project or in these directories:
+  node_modules
+[0m [90m 3 |[39m
+ [90m 4 |[39m [36mconst[39m [33mFormData$1[39m [33m=[39m require([32m'form-data'[39m)[33m;[39m
+[31m[1m>[22m[39m[90m 5 |[39m [36mconst[39m crypto [33m=[39m require([32m'crypto'[39m)[33m;[39m
+ [90m   |[39m                         [31m[1m^[22m[39m
+ [90m 6 |[39m [36mconst[39m url [33m=[39m require([32m'url'[39m)[33m;[39m
+ [90m 7 |[39m [36mconst[39m proxyFromEnv [33m=[39m require([32m'proxy-from-env'[39m)[33m;[39m
+ [90m 8 |[39m [36mconst[39m http [33m=[39m require([32m'http'[39m)[33m;[39m[0m
+Error: Unable to resolve module crypto from D:\Projects\auth-checker\app\node_modules\axios\dist\node\axios.cjs: crypto could not be found within the project or in these directories:
+  node_modules
+[0m [90m 3 |[39m
+ [90m 4 |[39m [36mconst[39m [33mFormData$1[39m [33m=[39m require([32m'form-data'[39m)[33m;[39m
+[31m[1m>[22m[39m[90m 5 |[39m [36mconst[39m crypto [33m=[39m require([32m'crypto'[39m)[33m;[39m
+ [90m   |[39m                         [31m[1m^[22m[39m
+ [90m 6 |[39m [36mconst[39m url [33m=[39m require([32m'url'[39m)[33m;[39m
+ [90m 7 |[39m [36mconst[39m proxyFromEnv [33m=[39m require([32m'proxy-from-env'[39m)[33m;[39m
+ [90m 8 |[39m [36mconst[39m http [33m=[39m require([32m'http'[39m)[33m;[39m[0m
+    at ModuleResolver.resolveDependency (D:\Projects\auth-checker\app\node_modules\metro\src\node-haste\DependencyGraph\ModuleResolution.js:150:15)
+    at DependencyGraph.resolveDependency (D:\Projects\auth-checker\app\node_modules\metro\src\node-haste\DependencyGraph.js:248:43)
+    at D:\Projects\auth-checker\app\node_modules\metro\src\lib\transformHelpers.js:165:21
+    at resolveDependencies (D:\Projects\auth-checker\app\node_modules\metro\src\DeltaBundler\buildSubgraph.js:42:25)
+    at visit (D:\Projects\auth-checker\app\node_modules\metro\src\DeltaBundler\buildSubgraph.js:83:30)
+    at processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at async Promise.all (index 8)
+    at visit (D:\Projects\auth-checker\app\node_modules\metro\src\DeltaBundler\buildSubgraph.js:92:5)
+    at async Promise.all (index 2)
+    at visit (D:\Projects\auth-checker\app\node_modules\metro\src\DeltaBundler\buildSubgraph.js:92:5)

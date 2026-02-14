@@ -1,0 +1,26 @@
+Starting Metro Bundler
+warning: Bundler cache is empty, rebuilding (this may take a minute)
+Error: Unable to resolve module expo-font from D:\Projects\auth-checker\app\node_modules\@expo\vector-icons\build\createIconSet.js: expo-font could not be found within the project or in these directories:
+  node_modules
+[0m[31m[1m>[22m[39m[90m 1 |[39m [36mimport[39m [33m*[39m [36mas[39m [33mFont[39m [36mfrom[39m [32m'expo-font'[39m[33m;[39m
+ [90m   |[39m                        [31m[1m^[22m[39m
+ [90m 2 |[39m [36mimport[39m [33mReact[39m [36mfrom[39m [32m'react'[39m[33m;[39m
+ [90m 3 |[39m [36mimport[39m { [33mText[39m[33m,[39m } [36mfrom[39m [32m'react-native'[39m[33m;[39m
+ [90m 4 |[39m [36mimport[39m createIconSet [36mfrom[39m [32m'./vendor/react-native-vector-icons/lib/create-icon-set'[39m[33m;[39m[0m
+Error: Unable to resolve module expo-font from D:\Projects\auth-checker\app\node_modules\@expo\vector-icons\build\createIconSet.js: expo-font could not be found within the project or in these directories:
+  node_modules
+[0m[31m[1m>[22m[39m[90m 1 |[39m [36mimport[39m [33m*[39m [36mas[39m [33mFont[39m [36mfrom[39m [32m'expo-font'[39m[33m;[39m
+ [90m   |[39m                        [31m[1m^[22m[39m
+ [90m 2 |[39m [36mimport[39m [33mReact[39m [36mfrom[39m [32m'react'[39m[33m;[39m
+ [90m 3 |[39m [36mimport[39m { [33mText[39m[33m,[39m } [36mfrom[39m [32m'react-native'[39m[33m;[39m
+ [90m 4 |[39m [36mimport[39m createIconSet [36mfrom[39m [32m'./vendor/react-native-vector-icons/lib/create-icon-set'[39m[33m;[39m[0m
+    at ModuleResolver.resolveDependency (D:\Projects\auth-checker\app\node_modules\metro\src\node-haste\DependencyGraph\ModuleResolution.js:150:15)
+    at DependencyGraph.resolveDependency (D:\Projects\auth-checker\app\node_modules\metro\src\node-haste\DependencyGraph.js:248:43)
+    at D:\Projects\auth-checker\app\node_modules\metro\src\lib\transformHelpers.js:165:21
+    at resolveDependencies (D:\Projects\auth-checker\app\node_modules\metro\src\DeltaBundler\buildSubgraph.js:42:25)
+    at visit (D:\Projects\auth-checker\app\node_modules\metro\src\DeltaBundler\buildSubgraph.js:83:30)
+    at processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at async Promise.all (index 16)
+    at visit (D:\Projects\auth-checker\app\node_modules\metro\src\DeltaBundler\buildSubgraph.js:92:5)
+    at async Promise.all (index 10)
+    at visit (D:\Projects\auth-checker\app\node_modules\metro\src\DeltaBundler\buildSubgraph.js:92:5)
