@@ -779,7 +779,25 @@ async def scan_medicine(
         res = compute_trust_score(evidence)
         final_status = res['label']
         score = res['score']
-        reason = f"AI Read: '{full_text_raw[:160]}' | breakdown: {res['breakdown']}"
+        
+        # User Friendly Reason
+        bd = res['breakdown']
+        reasons = []
+        if bd.get('batch_in_db'): reasons.append("Batch verified.")
+        else: reasons.append("Batch not found.")
+        
+        if bd.get('serial_valid'): reasons.append("Serial number valid.")
+        elif detected_serial_raw: reasons.append("Serial number invalid.")
+        
+        if bd.get('mfg_exp_valid'): reasons.append("Dates valid.")
+        
+        if final_status == 'AUTHENTIC':
+             reason = "Product verified successfully. " + " ".join(reasons)
+        elif final_status == 'FAKE':
+             reason = "Potential counterfeit detected. " + " ".join(reasons)
+        else:
+             reason = "Verification inconclusive. " + " ".join(reasons)
+
         product_name = golden_record.brand_name if golden_record else (best_brand or "Unknown")
 
         # Persist scan history
