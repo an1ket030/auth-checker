@@ -12,8 +12,10 @@ import re
 import traceback
 import io
 
-# OCR engine and fuzzy string match
-from thefuzz import fuzz
+from ml.inference.engine import MLInferenceEngine
+
+# Initialize ML Engine
+ml_engine = MLInferenceEngine()
 
 # Barcode decode
 from PIL import Image
@@ -38,7 +40,12 @@ from slowapi.errors import RateLimitExceeded
 limiter = Limiter(key_func=get_remote_address)
 
 # SECURITY CONFIG
-SECRET_KEY = os.getenv("SECRET_KEY", "supersecretkey123") # Change in prod
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    if os.getenv("ENVIRONMENT") == "production":
+        raise ValueError("No SECRET_KEY set for production environment.")
+    print("WARNING: Using default insecure key for development.")
+    SECRET_KEY = "supersecretkey123"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 600
 
@@ -125,7 +132,7 @@ async def startup_event():
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=os.getenv("ALLOWED_ORIGINS", "*").split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -187,228 +194,7 @@ MONTH_MAP = {
     'JUL':7, 'AUG':8, 'SEP':9, 'SEPT':9, 'OCT':10, 'NOV':11, 'DEC':12
 }
 
-def normalize_batch(raw: Optional[str]) -> Optional[str]:
-    """
-    Normalize OCR batch strings to a canonical alnum-hyphen form.
 
-    Fixes common OCR confusions (e.g. 'N0' -> 'NO', leading '0' where 'O' expected),
-    removes noise and enforces at-least-two-digits sanity check.
-    """
-    if not raw:
-        return None
-    s = str(raw).upper().strip()
-
-    # 1. Remove standard prefixes (spaced or dotted)
-    #    MATCH: BATCH, B.NO, BNO, B-NO etc.
-    s = re.sub(r'^\s*(BATCH|B\.?NO\.?|BNO|B[\.\s]?NO[:\.\s-]*)\s*', '', s, flags=re.I)
-
-    # 2. Aggressive Glue Removal:
-    #    OCR often reads "B.No.XY123" as "NOXY123" or "0XY123" or "N0XY123"
-    #    Remove leading "NO", "N0", "0", "O" if followed by letters/digits
-    #    Repeat loop to catch multiple layers like "NON0..."
-    for _ in range(3):
-        s = re.sub(r'^(NO|N0|0|O)(?=[A-Z0-9])', '', s, flags=re.I)
-
-    # 3. Remove non-alnum (keep hyphen/slash)
-    s = re.sub(r'[^A-Z0-9\-\/]', '', s)
-
-    # 4. Require at least 3 digits (stricter sanity)
-    #    Real batches usually have 4-10 chars.
-    if len(s) < 3: 
-        return None
-        
-    return s
-
-
-def extract_dates_from_text(full_text: str):
-    """Return (mfg_date, exp_date) or (None, None)"""
-    if not full_text:
-        return None, None
-    text = full_text.upper()
-    mfg = None
-    exp = None
-
-    month_year_pat = re.compile(r'([A-Z]{3,4})[\.\/\-\s]?\.?(\d{4})')
-    numeric_mmyy = re.compile(r'([0-1]?\d)[\/\-\.](\d{2,4})')
-
-    mfg_match = re.search(r'(MFG|MFD|MFG\.)\s*[:\-]?\s*([A-Z0-9\./\-]{3,12})', text)
-    if mfg_match:
-        candidate = mfg_match.group(2)
-        my = month_year_pat.search(candidate)
-        if my:
-            mon = my.group(1)[:3]; yr = int(my.group(2))
-            monnum = MONTH_MAP.get(mon[:3], None)
-            if monnum: mfg = date(yr, monnum, 1)
-        else:
-            nmy = numeric_mmyy.search(candidate)
-            if nmy:
-                monnum = int(nmy.group(1)); yr = int(nmy.group(2)) if len(nmy.group(2))==4 else 2000+int(nmy.group(2))
-                if 1 <= monnum <= 12: mfg = date(yr, monnum, 1)
-
-    exp_match = re.search(r'(EXP|EXP\.|EXPIRY|EXPIRY\.)\s*[:\-]?\s*([A-Z0-9\./\-]{3,12})', text)
-    if exp_match:
-        candidate = exp_match.group(2)
-        my = month_year_pat.search(candidate)
-        if my:
-            mon = my.group(1)[:3]; yr = int(my.group(2))
-            monnum = MONTH_MAP.get(mon[:3], None)
-            if monnum: exp = date(yr, monnum, 1)
-        else:
-            nmy = numeric_mmyy.search(candidate)
-            if nmy:
-                monnum = int(nmy.group(1)); yr = int(nmy.group(2)) if len(nmy.group(2))==4 else 2000+int(nmy.group(2))
-                if 1 <= monnum <= 12: exp = date(yr, monnum, 1)
-
-    if not exp:
-        fallback = re.search(r'EXP[\.\s:\/\-]*([A-Z0-9\.\-\/]{3,12})', text)
-        if fallback:
-            candidate = fallback.group(1)
-            my = month_year_pat.search(candidate)
-            if my:
-                mon = my.group(1)[:3]; yr = int(my.group(2))
-                monnum = MONTH_MAP.get(mon[:3], None)
-                if monnum: exp = date(yr, monnum, 1)
-
-    return mfg, exp
-
-def mfg_exp_valid(mfg_date: Optional[date], exp_date: Optional[date]):
-    try:
-        if not exp_date:
-            return False
-        today = date.today()
-        if exp_date.year < today.year or (exp_date.year == today.year and exp_date.month < today.month):
-            return False
-        if mfg_date and exp_date:
-            return mfg_date < exp_date
-        return True
-    except:
-        return False
-
-def compute_trust_score(evidence: dict):
-    """Same scoring function we used earlier — returns score + label + breakdown."""
-    product_matched = bool(evidence.get('product_matched'))
-    batch_in_db = bool(evidence.get('batch_in_db'))
-    dates_ok = bool(evidence.get('mfg_exp_valid'))
-    ocr_conf = float(evidence.get('ocr_confidence', 0.0))
-    packaging_sim = float(evidence.get('packaging_sim', 0.0))
-    manufacturer_verified = bool(evidence.get('manufacturer_verified', False))
-    registry = bool(evidence.get('pharma_registry_match', False))
-
-    # Adjusted weights: verified batch is the critical factor
-    weights = {
-        'product_matched': 0.20,
-        'batch_in_db': 0.50, # Critical factor
-        'mfg_exp_valid': 0.10,
-        'ocr_confidence': 0.05,
-        'packaging_sim': 0.05,
-        'manufacturer_verified': 0.05,
-        'registry': 0.05,
-        'serial_valid': 0.0 # treated as bonus now
-    }
-
-    s_product = 1.0 if product_matched else 0.0
-    s_batch = 1.0 if batch_in_db else 0.0
-    s_dates = 1.0 if dates_ok else 0.0
-    s_ocr = max(0.0, min(1.0, ocr_conf))
-    s_pack = max(0.0, min(1.0, packaging_sim))
-    s_mfg = 1.0 if manufacturer_verified else 0.0
-    s_reg = 1.0 if registry else 0.0
-    
-    # Serial Logic: 
-    s_serial = 0.0
-    if evidence.get('serial_valid'):
-        if evidence.get('serial_is_clone', False):
-             s_serial = -1.0
-        else:
-             s_serial = 1.0
-
-    raw = (weights['product_matched']*s_product +
-           weights['batch_in_db']*s_batch +
-           weights['mfg_exp_valid']*s_dates +
-           weights['ocr_confidence']*s_ocr +
-           weights['packaging_sim']*s_pack +
-           weights['manufacturer_verified']*s_mfg +
-           weights['registry']*s_reg +
-           0.20*max(0, s_serial)) # Bonus 20% for serial
-           
-    max_w = sum(weights.values()) + 0.20
-    normalized = (raw / max_w) * 100.0
-
-    # BATCH OVERRIDE: If batch is in DB, it is AUTHENTIC
-    if batch_in_db:
-        normalized = max(normalized, 96.0)
-
-    # SERIAL OVERRIDE: If serial is valid, ensure AUTHENTIC
-    if s_serial == 1.0:
-        normalized = max(normalized, 99.0)
-    
-    # CLONE OVERRIDE: If serial is clone, force SUSPICIOUS or FAKE
-    if s_serial == -1.0:
-        normalized = 0.0
-        label = ScanStatus.SUSPICIOUS.value
-        return {'score': 0.0, 'label': label, 'breakdown': {'cloned_serial': True}}
-
-    positive_count = sum([s_product>0, s_batch>0, s_dates>0, s_ocr>0.5, s_pack>0.5, s_mfg>0, s_reg>0])
-    
-    # UNIFIED THRESHOLD: 75%
-    if normalized >= 75:
-        label = ScanStatus.AUTHENTIC.value
-    elif normalized >= 40 and positive_count >= 1:
-        label = ScanStatus.SUSPICIOUS.value
-    elif normalized >= 20:
-        label = "UNKNOWN"
-    else:
-        label = ScanStatus.FAKE.value
-
-    breakdown = {
-        'product_matched': s_product,
-        'batch_in_db': s_batch,
-        'mfg_exp_valid': s_dates,
-        'ocr_confidence': round(s_ocr, 3),
-        'packaging_sim': round(s_pack, 3),
-        'manufacturer_verified': s_mfg,
-        'registry': s_reg,
-        'serial_valid': s_serial,
-        'raw_score': raw,
-        'normalized': round(normalized, 2),
-        'positive_count': int(positive_count)
-    }
-
-    return {'score': round(normalized, 2), 'label': label, 'breakdown': breakdown}
-
-# --- fuzzy brand/manufacturer helper
-def fuzzy_match_brand_manufacturer(full_text: str, db: Session):
-    """
-    Returns (best_brand, brand_score_float, best_manufacturer, manufacturer_score_float)
-    scores are in [0.0, 1.0]
-    """
-    if not full_text:
-        return None, 0.0, None, 0.0
-    text = full_text.upper()
-
-    try:
-        brands = [row[0] for row in db.query(ValidMedicine.brand_name).distinct()]
-        mans = [row[0] for row in db.query(ValidMedicine.manufacturer).distinct()]
-    except Exception:
-        brands, mans = [], []
-
-    best_brand, best_b_score = None, 0
-    for b in brands:
-        if not b: continue
-        r = fuzz.partial_ratio(b.upper(), text)
-        if r > best_b_score:
-            best_b_score = r
-            best_brand = b
-
-    best_man, best_m_score = None, 0
-    for m in mans:
-        if not m: continue
-        r = fuzz.partial_ratio(m.upper(), text)
-        if r > best_m_score:
-            best_m_score = r
-            best_man = m
-
-    return best_brand, best_b_score/100.0, best_man, best_m_score/100.0
 
 # --- barcode decode helper
 def decode_barcode_from_bytes(image_bytes: bytes):
@@ -533,299 +319,67 @@ async def scan_medicine(
         if not filename.endswith(('.jpg', '.jpeg', '.png', '.webp')):
              raise HTTPException(status_code=400, detail="Invalid file type. Only JPG, PNG, WEBP allowed.")
 
-        # save uploaded image
-        file_id = str(uuid.uuid4())
-        file_ext = filename.split(".")[-1]
-        file_path = f"uploads/{file_id}.{file_ext}"
+        # Save upload to temp file for debugging/logging (optional)
+        file_location = f"uploads/{file.filename}"
         os.makedirs("uploads", exist_ok=True)
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
-        with open(file_path, "rb") as img_file:
-            image_bytes = img_file.read()
-
-        # 1) OCR (Synchronous to avoid thread safety issues with PaddleOCR)
-        # from fastapi.concurrency import run_in_threadpool
-        # ocr_result = await run_in_threadpool(ml_engine.extract_text, image_bytes)
         
-        ocr_result = ml_engine.extract_text(image_bytes)
+        # Read file bytes
+        image_bytes = await file.read()
         
-        detected_batch_raw = ocr_result.get("batch_number")
-        detected_serial_raw = ocr_result.get("serial_number") # Capture SN
-        full_text_raw = ocr_result.get("full_text", "") or ""
+        with open(file_location, "wb+") as file_object:
+            file_object.write(image_bytes)
+
+        # 1) ML Inference
+        # Predict using the new ML Engine
+        ml_result = ml_engine.predict(image_bytes)
         
-        # LOGGING FOR DEBUGGING
-        try:
-            with open("debug_ocr.log", "a", encoding="utf-8") as log:
-                log.write(f"\n--- SCAN {datetime.now()} ---\n")
-                log.write(f"Image Size: {len(image_bytes)} bytes\n")
-                log.write(f"Raw Text:\n{full_text_raw}\n")
-                log.write(f"Detected Batch Raw: {detected_batch_raw}\n")
-                log.write(f"Detected Serial Raw: {detected_serial_raw}\n")
-        except Exception as log_err:
-            print(f"Logging failed: {log_err}")
-
-        print(f"[DEBUG] OCR detected_batch_raw={detected_batch_raw!r}, SN={detected_serial_raw!r}")
-
-        # Normalize batch
-        normalized_batch = normalize_batch(detected_batch_raw)
-        print(f"[DEBUG] normalized_batch={normalized_batch!r}")
+        final_status = ml_result['label'] # "AUTHENTIC" or "FAKE"
+        confidence = ml_result['confidence']
         
-        with open("debug_ocr.log", "a", encoding="utf-8") as log:
-             log.write(f"Normalized Batch: {normalized_batch}\n")
-
-        # default evidence
-        evidence = {
-            'product_matched': False,
-            'batch_in_db': False,
-            'mfg_exp_valid': False,
-            'ocr_confidence': 0.0,
-            'packaging_sim': 0.0,
-            'manufacturer_verified': False,
-            'manufacturer_verified': False,
-            'pharma_registry_match': False,
-            'serial_valid': False
-        }
-
-        # 2) barcode decode from image (if client did not supply)
-        barcodes = []
-        if barcode:
-            # client provided barcode string (prefer it)
-            barcodes = [{'data': barcode, 'type': 'CLIENT'}]
-            print(f"[DEBUG] Received barcode from client: {barcode}")
-        else:
-            barcodes = decode_barcode_from_bytes(image_bytes)
-            print(f"[DEBUG] Barcodes decoded from image: {barcodes}")
-
-        # helper: normalize barcode string to alnum uppercase
-        def _normalize_barcode(s):
-            if not s: return None
-            return re.sub(r'[^A-Z0-9]', '', str(s).upper())
-
-        barcode_val = None
-        if barcodes:
-            raw_bar = barcodes[0].get('data', '').strip()
-            barcode_val = _normalize_barcode(raw_bar)
-            print(f"[DEBUG] Normalized barcode: {barcode_val}")
-
-        golden_record = None
-
-        if barcode_val:
-            try:
-                # Prefer exact GTIN lookup (use gtin column if available)
-                try:
-                    med_by_gtin = db.query(ValidMedicine).filter(ValidMedicine.gtin == barcode_val).first()
-                except Exception:
-                    # fallback if model lacks gtin field: try packaging_hash or batch_number checks
-                    med_by_gtin = None
-
-                if med_by_gtin:
-                    print("[DEBUG] GTIN matched local DB record (gtin).")
-                    golden_record = med_by_gtin
-                    evidence['product_matched'] = True
-                    evidence['barcode_found'] = True
-                    evidence['barcode_value'] = barcode_val
-                else:
-                    # Try tolerant fallback: suffix match for numeric GTINs (last up to 13 digits)
-                    if barcode_val.isdigit():
-                        suffix = barcode_val[-13:]
-                        try:
-                            med_by_suffix = db.query(ValidMedicine).filter(ValidMedicine.gtin.ilike(f"%{suffix}")).first()
-                        except Exception:
-                            med_by_suffix = None
-                        if med_by_suffix:
-                            print("[DEBUG] GTIN suffix matched local DB record.")
-                            golden_record = med_by_suffix
-                            evidence['product_matched'] = True
-                            evidence['barcode_found'] = True
-                            evidence['barcode_value'] = barcode_val
-            except Exception as e:
-                print(f"[DEBUG] GTIN DB lookup error: {e}")
-                golden_record = None
-
-        # 3) fuzzy brand / manufacturer matching
-        best_brand, brand_score, best_man, man_score = fuzzy_match_brand_manufacturer(full_text_raw, db)
-        print(f"[DEBUG] brand match: {best_brand} ({brand_score:.2f}), manufacturer match: {best_man} ({man_score:.2f})")
-        if brand_score >= 0.60:
-            evidence['product_matched'] = True
-        evidence['brand_match_score'] = brand_score
-        if man_score >= 0.60:
-            evidence['manufacturer_verified'] = True
-        evidence['manufacturer_score'] = man_score
-
-        # 4) tolerant DB lookup by normalized_batch (if any)
-        golden_record_from_batch = False
-        if normalized_batch and not golden_record:
-            tried_variants = []
-            candidates = []
-
-            # original normalized candidate
-            candidates.append(normalized_batch)
-
-            # common OCR-corrected variants:
-            # N0 -> NO (leading)
-            if normalized_batch.startswith('N0'):
-                candidates.append('NO' + normalized_batch[2:])
-            # replace N0 anywhere before letters
-            candidates.append(re.sub(r'N0(?=[A-Z])', 'NO', normalized_batch))
-            # leading 0 -> O (if followed by letter)
-            candidates.append(re.sub(r'^0(?=[A-Z])', 'O', normalized_batch))
-
-            # dedupe candidates preserving order
-            seen = set()
-            filtered = []
-            for c in candidates:
-                if c and c not in seen:
-                    seen.add(c)
-                    filtered.append(c)
-            candidates = filtered
-            # Try exact matches first across variants
-            for cand in candidates:
-                tried_variants.append(cand)
-                try:
-                    gr = db.query(ValidMedicine).filter(ValidMedicine.batch_number == cand).first()
-                except Exception:
-                    gr = None
-                if gr:
-                    golden_record = gr
-                    golden_record_from_batch = True
-                    print(f"[DEBUG] tolerant exact match using variant: {cand}")
-                    break
-             # If still not found, try stripping common leading NO (if present) and match again
-            if not golden_record:
-                for cand in candidates:
-                    maybe = re.sub(r'^(NO|N0)', '', cand, flags=re.I)
-                    if maybe and maybe != cand:
-                        try:
-                            gr = db.query(ValidMedicine).filter(ValidMedicine.batch_number == maybe).first()
-                        except Exception:
-                            gr = None
-                        if gr:
-                            golden_record = gr
-                            golden_record_from_batch = True
-                            print(f"[DEBUG] match after stripping NO prefix: {maybe} (from {cand})")
-                            break
-            # Finally try suffix ilike matching for each candidate (handles truncated OCR)
-            if not golden_record:
-                for cand in candidates:
-                    suffix = cand[-12:]
-                    try:
-                        gr = db.query(ValidMedicine).filter(ValidMedicine.batch_number.ilike(f"%{suffix}")).first()
-                    except Exception:
-                        gr = None
-                    print(f"[DEBUG] suffix ilike lookup (%{suffix}): {'FOUND' if gr else 'NOT FOUND'}")
-                    if gr:
-                        golden_record = gr
-                        golden_record_from_batch = True
-                        print(f"[DEBUG] tolerant suffix match using variant: {cand}")
-                        break
-            print(f"[DEBUG] tried batch variants: {tried_variants}")
-        # Now set batch_in_db only if match came from batch lookup
-        if golden_record_from_batch:
-            evidence['batch_in_db'] = True
-
-        # If golden_record exists (from either GTIN or batch), set product_matched True
-        if golden_record:
-            evidence['product_matched'] = True
-            print(f"[DEBUG] golden_record found: {golden_record.batch_number} -> {golden_record.brand_name}")
-
-        # 4.5) Check Serial Number logic
-        if detected_serial_raw:
-            # Clean it
-            sn_clean = re.sub(r'[^A-Z0-9]', '', detected_serial_raw.upper())
-            # Check DB
-            med_by_sn = db.query(ValidMedicine).filter(ValidMedicine.serial_number == sn_clean).first()
-            if med_by_sn:
-                print(f"[DEBUG] Valid Serial Number found: {sn_clean}")
-                evidence['serial_valid'] = True
-                
-                # Check CLONE status
-                # If scanned > 10 times, flag it
-                old_count = med_by_sn.scan_count or 0
-                if old_count > 10:
-                    print(f"[WARN] Serial {sn_clean} scanned {old_count} times! Possible Clone.")
-                    evidence['serial_is_clone'] = True
-                
-                # Update Scan Count (Increment)
-                try:
-                    med_by_sn.scan_count = old_count + 1
-                    med_by_sn.last_scanned_at = datetime.utcnow()
-                    db.commit()
-                except Exception as e:
-                    print(f"[DB Error] Failed to update scan count: {e}")
-                    db.rollback()
-
-                # If we didn't have a golden record before, we do now
-                if not golden_record:
-                    golden_record = med_by_sn
-                    evidence['product_matched'] = True
-            else:
-                print(f"[DEBUG] Unknown Serial Number: {sn_clean}")
-
-        # 5) extract & validate dates
-        mfg_date, exp_date = extract_dates_from_text(full_text_raw)
-        evidence['mfg_exp_valid'] = mfg_exp_valid(mfg_date, exp_date)
-        print(f"[DEBUG] mfg_date={mfg_date}, exp_date={exp_date}, mfg_exp_valid={evidence['mfg_exp_valid']}")
-
-        # 6) OCR confidence heuristic
-        if full_text_raw and detected_batch_raw and detected_batch_raw != "UNKNOWN":
-            evidence['ocr_confidence'] = 0.8
-        elif full_text_raw:
-            evidence['ocr_confidence'] = 0.5
-        else:
-            evidence['ocr_confidence'] = 0.2
-
-        # Compute trust score
-        res = compute_trust_score(evidence)
-        final_status = res['label']
-        score = res['score']
+        # 2) Trust Score & Reason
+        # Simple mapping: 
+        # If Authentic with high confidence -> High Score
+        # If Authentic with low confidence -> Medium Score
+        # If Fake -> Low Score
         
-        # User Friendly Reason
-        bd = res['breakdown']
-        reasons = []
-        if bd.get('batch_in_db'): reasons.append("Batch verified.")
-        else: reasons.append("Batch not found.")
+        score = int(confidence * 100)
+        if final_status == 'FAKE':
+            score = 100 - score # Invert confidence for FAKE (e.g. 99% confident it's fake = 1% trust)
         
-        if bd.get('serial_valid'): reasons.append("Serial number valid.")
-        elif detected_serial_raw: reasons.append("Serial number invalid.")
-        
-        if bd.get('mfg_exp_valid'): reasons.append("Dates valid.")
-        
+        # Reason generation
         if final_status == 'AUTHENTIC':
-             reason = "Product verified successfully. " + " ".join(reasons)
-        elif final_status == 'FAKE':
-             reason = "Potential counterfeit detected. " + " ".join(reasons)
+            if confidence > 0.9:
+                reason = "High confidence authentic packaging detected."
+            else:
+                reason = "Packaging looks authentic but with lower confidence."
         else:
-             reason = "Verification inconclusive. " + " ".join(reasons)
+            reason = "Potential counterfeit detected based on packaging analysis."
 
-        product_name = golden_record.brand_name if golden_record else (best_brand or "Unknown")
-
+        product_name = "Unknown Product" # Placeholder, later can limit scope or use other metadata
+        
         # Persist scan history
         scan = ScanHistory(
             user_id=current_user.id,
-            scanned_batch_number=normalize_batch(detected_batch_raw) or (detected_batch_raw or "UNKNOWN"),
+            scanned_batch_number="ML_SCAN" , # Legacy field
             authenticity_score=score,
             status=final_status,
-            image_path=file_path
+            scan_image_path=file_location, # Changed from image_path to scan_image_path
+            # Store full ML breakdown if possible, for now just status
         )
-        # optionally, if ScanHistory model has barcode_detected attribute, set it here:
-        try:
-            if barcode_val and hasattr(scan, 'barcode_detected'):
-                setattr(scan, 'barcode_detected', barcode_val)
-        except Exception:
-            pass
-
+        
         db.add(scan)
         db.commit()
 
         return {
             "status": final_status,
-            "label": final_status, # Frontend expects label
+            "label": final_status, 
             "score": score,
             "reason": reason,
             "product": product_name,
-            "breakdown": res['breakdown']
+            "breakdown": ml_result
         }
+        
+
 
     except Exception as e:
         traceback.print_exc()
