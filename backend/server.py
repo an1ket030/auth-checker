@@ -17,9 +17,7 @@ from ml.inference.engine import MLInferenceEngine
 # Initialize ML Engine
 # ML Engine initialized lazily below
 
-# Barcode decode
-from PIL import Image
-from pyzbar.pyzbar import decode as pyzbar_decode
+# pyzbar removed due to deployment constraints (libzbar0 missing on Render Python env)
 
 from .database import engine, get_db, Base
 from .database import engine, get_db, Base
@@ -201,21 +199,7 @@ MONTH_MAP = {
 
 
 # --- barcode decode helper
-def decode_barcode_from_bytes(image_bytes: bytes):
-    try:
-        img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
-        decoded = pyzbar_decode(img)
-        results = []
-        for d in decoded:
-            try:
-                data = d.data.decode('utf-8', errors='ignore')
-            except Exception:
-                data = d.data.decode('latin1', errors='ignore')
-            results.append({'data': data, 'type': d.type})
-        return results
-    except Exception as e:
-        print("Barcode decode error:", e)
-        return []
+# decode_barcode_from_bytes removed
 
 # ---- Routes ----
 @app.post("/api/v1/register", response_model=UserResponse)
