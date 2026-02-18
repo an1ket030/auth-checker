@@ -15,7 +15,7 @@ import io
 from ml.inference.engine import MLInferenceEngine
 
 # Initialize ML Engine
-ml_engine = MLInferenceEngine()
+# ML Engine initialized lazily below
 
 # Barcode decode
 from PIL import Image
@@ -93,11 +93,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
         raise credentials_exception
     return user
 
-import sys
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from ml.inference.engine import InferenceEngine  # your existing OCR wrapper
-
-# Force table creation (models must match DB; migrations preferred)
+# Legacy imports removed# Force table creation (models must match DB; migrations preferred)
 # Force table creation (models must match DB; migrations preferred)
 Base.metadata.create_all(bind=engine)
 
@@ -142,7 +138,15 @@ app.add_middleware(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-ml_engine = InferenceEngine()
+# ml_engine initialized lazily
+_ml_engine_instance = None
+
+def get_ml_engine():
+    global _ml_engine_instance
+    if _ml_engine_instance is None:
+        print("Lazy loading ML Engine...")
+        _ml_engine_instance = MLInferenceEngine()
+    return _ml_engine_instance
 
 from pydantic import BaseModel, validator, EmailStr
 
@@ -330,7 +334,8 @@ async def scan_medicine(
             file_object.write(image_bytes)
 
         # 1) ML Inference
-        # Predict using the new ML Engine
+        # Predict using the new ML Engine (Lazy Load)
+        ml_engine = get_ml_engine()
         ml_result = ml_engine.predict(image_bytes)
         
         final_status = ml_result['label'] # "AUTHENTIC" or "FAKE"
