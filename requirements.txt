@@ -17,3 +17,4 @@ albumentations
 pyyaml
 matplotlib
 seaborn
+pyzbar
