@@ -17,3 +17,5 @@ albumentations
 pyyaml
 matplotlib
 seaborn
+slowapi
+Pillow
