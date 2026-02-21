@@ -352,7 +352,7 @@ async def scan_medicine(
             scanned_batch_number="ML_SCAN" , # Legacy field
             authenticity_score=score,
             status=final_status,
-            scan_image_path=file_location, # Changed from image_path to scan_image_path
+            image_path=file_location,
             # Store full ML breakdown if possible, for now just status
         )
         
