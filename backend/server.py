@@ -1,5 +1,5 @@
 # backend/server.py (FULL - patched)
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -213,6 +213,16 @@ class ResetPasswordRequest(BaseModel):
         if not re.search(r"[0-9]", v):
             raise ValueError("Password must contain at least one number")
         return v
+
+class DrugResponse(BaseModel):
+    id: int
+    brand_name: str
+    generic_name: Optional[str] = None
+    composition: Optional[str] = None
+    usage: Optional[str] = None
+    side_effects: Optional[str] = None
+    manufacturer: Optional[str] = None
+    category: Optional[str] = None
 
 class RefreshRequest(BaseModel):
     refresh_token: str
@@ -741,3 +751,36 @@ async def scan_medicine(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+# ---- Drug Information Endpoints ----
+
+@app.get("/api/v1/drugs", response_model=List[DrugResponse])
+def get_drugs(
+    search: Optional[str] = Query(None),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db)
+):
+    """
+    Get a paginated list of drugs, optionally filtered by a search string 
+    (matches brand_name or generic_name).
+    """
+    query = db.query(DrugInformation)
+    
+    if search:
+        search_term = f"%{search}%"
+        query = query.filter(
+            (DrugInformation.brand_name.ilike(search_term)) |
+            (DrugInformation.generic_name.ilike(search_term))
+        )
+        
+    drugs = query.order_by(DrugInformation.brand_name.asc()).offset(skip).limit(limit).all()
+    return drugs
+
+@app.get("/api/v1/drugs/{drug_id}", response_model=DrugResponse)
+def get_drug_detail(drug_id: int, db: Session = Depends(get_db)):
+    """Get detailed information for a specific drug by ID."""
+    drug = db.query(DrugInformation).filter(DrugInformation.id == drug_id).first()
+    if not drug:
+        raise HTTPException(status_code=404, detail="Drug information not found")
+    return drug
