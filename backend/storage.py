@@ -1,105 +1,91 @@
 import os
-import boto3
-from botocore.exceptions import ClientError
-from fastapi import UploadFile
 import uuid
+import cloudinary
+import cloudinary.uploader
+import cloudinary.api
 
-# Cloudflare R2 Configuration
-# Documentation: https://developers.cloudflare.com/r2/api/s3/api/
-R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID")
-R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID")
-R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY")
-R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "auth-checker-images")
-R2_PUBLIC_URL_PREFIX = os.getenv("R2_PUBLIC_URL_PREFIX") # e.g., https://pub-xxxxxxxxxx.r2.dev
+# Cloudinary Configuration
+# Documentation: https://cloudinary.com/documentation/django_integration
+CLOUDINARY_URL = os.getenv("CLOUDINARY_URL")
 
-s3_client = None
+is_configured = False
 
-def get_s3_client():
-    global s3_client
-    if s3_client is None and R2_ACCOUNT_ID and R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY:
-        try:
-            s3_client = boto3.client(
-                's3',
-                endpoint_url=f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com",
-                aws_access_key_id=R2_ACCESS_KEY_ID,
-                aws_secret_access_key=R2_SECRET_ACCESS_KEY,
-                region_name='auto' # Cloudflare R2 requires 'auto'
-            )
-            print("[Storage] Cloudflare R2 client initialized successfully.")
-        except Exception as e:
-            print(f"[Storage] Failed to initialize R2 client: {e}")
-    return s3_client
+if CLOUDINARY_URL:
+    try:
+        # cloudinary package will automatically pick up the CLOUDINARY_URL env var
+        # if we just import it, but we can also explicitly configure it if needed.
+        # Since it's in the environment, it auto-configures.
+        is_configured = True
+        print("[Storage] Cloudinary client initialized successfully from CLOUDINARY_URL.")
+    except Exception as e:
+        print(f"[Storage] Failed to initialize Cloudinary: {e}")
+else:
+    print("[Storage] WARNING: CLOUDINARY_URL not found. Image uploads will fallback to local storage.")
 
 
 def upload_image_to_r2(file_bytes: bytes, filename: str, content_type: str = "image/jpeg") -> str:
     """
-    Uploads an image to Cloudflare R2 and returns the public URL.
-    Generates a unique filename using UUID to prevent collisions.
+    Uploads an image to Cloudinary and returns the public URL.
+    (Kept the function name 'upload_image_to_r2' for backwards compatibility with server.py, 
+    but it now uploads to Cloudinary).
     """
-    client = get_s3_client()
-    
-    # If R2 is not configured, fallback to returning None or error
-    if not client:
-        print("[Storage] WARNING: Upload skipped. R2 is not configured.")
+    if not is_configured:
+        print("[Storage] WARNING: Upload skipped. Cloudinary is not configured.")
         return None
 
     try:
-        # Generate unique filename: uuid + extension
-        ext = os.path.splitext(filename)[1].lower()
-        if not ext:
-            ext = ".jpg"
-        unique_filename = f"{uuid.uuid4().hex}{ext}"
+        # Generate unique filename: uuid
+        # (Cloudinary handles extensions automatically)
+        unique_filename = uuid.uuid4().hex
 
-        client.put_object(
-            Bucket=R2_BUCKET_NAME,
-            Key=unique_filename,
-            Body=file_bytes,
-            ContentType=content_type
+        # Upload to Cloudinary
+        response = cloudinary.uploader.upload(
+            file_bytes,
+            public_id=f"auth_checker/scans/{unique_filename}",
+            resource_type="image"
         )
         
-        # Construct the public URL
-        if R2_PUBLIC_URL_PREFIX:
-            url = f"{R2_PUBLIC_URL_PREFIX.rstrip('/')}/{unique_filename}"
-        else:
-            # Fallback format if public prefix is not set, though typical R2 uses custom domains or r2.dev
-            url = f"https://{R2_BUCKET_NAME}.{R2_ACCOUNT_ID}.r2.cloudflarestorage.com/{unique_filename}"
+        # Construct the public URL (using secure URL)
+        url = response.get('secure_url')
             
-        print(f"[Storage] Successfully uploaded {unique_filename} to R2")
+        print(f"[Storage] Successfully uploaded to Cloudinary: {url}")
         return url
         
-    except ClientError as e:
-        print(f"[Storage Error] Boto3 client error during upload: {e}")
-        return None
     except Exception as e:
-        print(f"[Storage Error] Unexpected error during upload: {e}")
+        print(f"[Storage Error] Unexpected error during Cloudinary upload: {e}")
         return None
 
 
 def delete_image_from_r2(image_url: str) -> bool:
     """
-    Deletes an object from Cloudflare R2 given its public URL.
+    Deletes an object from Cloudinary given its public URL.
     """
-    client = get_s3_client()
-    if not client or not image_url:
+    if not is_configured or not image_url:
         return False
         
     try:
-        # Extract the key (filename) from the URL
-        if R2_PUBLIC_URL_PREFIX and image_url.startswith(R2_PUBLIC_URL_PREFIX):
-            key = image_url.replace(R2_PUBLIC_URL_PREFIX.rstrip('/') + '/', "")
-        else:
-            # Try to grab the last part of the URL
-            key = image_url.split('/')[-1]
-
-        client.delete_object(
-            Bucket=R2_BUCKET_NAME,
-            Key=key
-        )
-        print(f"[Storage] Successfully deleted {key} from R2")
-        return True
-    except ClientError as e:
-        print(f"[Storage Error] Boto3 client error during delete: {e}")
+        # Extract the public_id from the URL
+        # Example URL: https://res.cloudinary.com/demo/image/upload/v1234567890/auth_checker/scans/abcdef.jpg
+        # We need "auth_checker/scans/abcdef"
+        
+        # Split by /upload/
+        parts = image_url.split('/upload/')
+        if len(parts) > 1:
+            path_part = parts[1]
+            # Remove version number if present (e.g., v12345/, sometimes it's not present)
+            path_parts = path_part.split('/')
+            if path_parts[0].startswith('v') and path_parts[0][1:].isdigit():
+                path_parts.pop(0)
+            
+            # Rejoin and remove extension
+            key_with_ext = '/'.join(path_parts)
+            public_id = os.path.splitext(key_with_ext)[0]
+            
+            cloudinary.uploader.destroy(public_id)
+            print(f"[Storage] Successfully deleted {public_id} from Cloudinary")
+            return True
+            
         return False
     except Exception as e:
-        print(f"[Storage Error] Unexpected error during delete: {e}")
+        print(f"[Storage Error] Unexpected error during Cloudinary delete: {e}")
         return False

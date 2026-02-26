@@ -12,5 +12,4 @@ slowapi
 Pillow
 httpx
 alembic>=1.12
-resend>=0.7
-boto3>=1.28
+cloudinary>=1.41.0
