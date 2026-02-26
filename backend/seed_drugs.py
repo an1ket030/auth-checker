@@ -1,170 +1,197 @@
-import json
-import os
-from sqlalchemy.orm import Session
-from database import SessionLocal, engine
-from models import DrugInformation, Base
+"""
+Comprehensive Drug Database Seeder
+Reads from the project's ML training datasets to populate the drug_information table.
 
-# Medicine data tailored to the Indian market
-MEDICINES_DATA = [
-    {
-        "brand_name": "Dolo 650",
-        "generic_name": "Paracetamol",
-        "composition": "Paracetamol (Acetaminophen) 650mg",
-        "usage": "Pain relief, fever reduction",
-        "side_effects": "Nausea, allergic reactions, liver damage in overdose",
-        "manufacturer": "Micro Labs Ltd",
-        "category": "Analgesic & Antipyretic"
-    },
-    {
-        "brand_name": "Augmentin 625 Duo",
-        "generic_name": "Amoxicillin + Clavulanic Acid",
-        "composition": "Amoxicillin 500mg, Clavulanic Acid 125mg",
-        "usage": "Bacterial infections (respiratory, ear, skin)",
-        "side_effects": "Diarrhea, nausea, skin rashes",
-        "manufacturer": "GlaxoSmithKline Pharmaceuticals Ltd",
-        "category": "Antibiotic"
-    },
-    {
-        "brand_name": "Pan 40",
-        "generic_name": "Pantoprazole",
-        "composition": "Pantoprazole 40mg",
-        "usage": "Acid reflux, peptic ulcer disease, GERD",
-        "side_effects": "Headache, diarrhea, stomach pain",
-        "manufacturer": "Alkem Laboratories Ltd",
-        "category": "Antacid (Proton Pump Inhibitor)"
-    },
-    {
-        "brand_name": "Telma 40",
-        "generic_name": "Telmisartan",
-        "composition": "Telmisartan 40mg",
-        "usage": "Hypertension (high blood pressure), heart failure prevention",
-        "side_effects": "Dizziness, back pain, sinus infection",
-        "manufacturer": "Glenmark Pharmaceuticals Ltd",
-        "category": "Antihypertensive"
-    },
-    {
-        "brand_name": "Thyronorm 50",
-        "generic_name": "Thyroxine",
-        "composition": "Levothyroxine 50mcg",
-        "usage": "Hypothyroidism (underactive thyroid)",
-        "side_effects": "Weight loss, rapid heart rate, sweating",
-        "manufacturer": "Abbott India Ltd",
-        "category": "Thyroid Hormone"
-    },
-    {
-        "brand_name": "Allegra 120",
-        "generic_name": "Fexofenadine",
-        "composition": "Fexofenadine 120mg",
-        "usage": "Allergies, hay fever, hives",
-        "side_effects": "Headache, drowsiness, dry mouth",
-        "manufacturer": "Sanofi India Ltd",
-        "category": "Antihistamine"
-    },
-    {
-        "brand_name": "Metrogyl 400",
-        "generic_name": "Metronidazole",
-        "composition": "Metronidazole 400mg",
-        "usage": "Parasitic and bacterial infections, amoebiasis",
-        "side_effects": "Metallic taste, nausea, dry mouth",
-        "manufacturer": "J.B. Chemicals & Pharmaceuticals Ltd",
-        "category": "Antimicrobial"
-    },
-    {
-        "brand_name": "Ascoril LS",
-        "generic_name": "Ambroxol + Levosalbutamol + Guaifenesin",
-        "composition": "Levosalbutamol 1mg, Ambroxol 30mg, Guaifenesin 50mg / 5ml",
-        "usage": "Cough with mucus, asthma, bronchitis",
-        "side_effects": "Tremors, increased heart rate, dizziness",
-        "manufacturer": "Glenmark Pharmaceuticals Ltd",
-        "category": "Cough Syrup/Expectorant"
-    },
-    {
-        "brand_name": "Amlokind-AT",
-        "generic_name": "Amlodipine + Atenolol",
-        "composition": "Amlodipine 5mg, Atenolol 50mg",
-        "usage": "Hypertension, angina",
-        "side_effects": "Slow heart rate, fatigue, cold extremities",
-        "manufacturer": "Mankind Pharma Ltd",
-        "category": "Antihypertensive"
-    },
-    {
-        "brand_name": "Lipicard 160",
-        "generic_name": "Fenofibrate",
-        "composition": "Fenofibrate 160mg",
-        "usage": "High cholesterol, high triglycerides",
-        "side_effects": "Stomach upset, liver enzyme elevations",
-        "manufacturer": "USV Pvt Ltd",
-        "category": "Lipid-Lowering Agent"
-    },
-    {
-        "brand_name": "Calpol 500",
-        "generic_name": "Paracetamol",
-        "composition": "Paracetamol 500mg",
-        "usage": "Mild pain relief, fever",
-        "side_effects": "Rarely liver toxicity if overused",
-        "manufacturer": "GlaxoSmithKline Pharmaceuticals Ltd",
-        "category": "Analgesic & Antipyretic"
-    },
-    {
-        "brand_name": "Montair LC",
-        "generic_name": "Montelukast + Levocetirizine",
-        "composition": "Montelukast 10mg, Levocetirizine 5mg",
-        "usage": "Allergic rhinitis, asthma",
-        "side_effects": "Sleepiness, fatigue, dry mouth",
-        "manufacturer": "Cipla Ltd",
-        "category": "Antiallergic"
-    },
-    {
-        "brand_name": "Ondem 4",
-        "generic_name": "Ondansetron",
-        "composition": "Ondansetron 4mg",
-        "usage": "Nausea and vomiting",
-        "side_effects": "Headache, constipation, sensation of warmth",
-        "manufacturer": "Alkem Laboratories Ltd",
-        "category": "Antiemetic"
-    },
-    {
-        "brand_name": "Ecosprin 75",
-        "generic_name": "Aspirin",
-        "composition": "Aspirin 75mg",
-        "usage": "Prevention of heart attacks and strokes, blood thinner",
-        "side_effects": "Bleeding, indigestion, heartburn",
-        "manufacturer": "USV Pvt Ltd",
-        "category": "Antiplatelet / Blood Thinner"
-    },
-    {
-        "brand_name": "Shelcal 500",
-        "generic_name": "Calcium Carbonate + Vitamin D3",
-        "composition": "Calcium Carbonate 500mg, Vitamin D3 250 IU",
-        "usage": "Calcium deficiency, osteoporosis",
-        "side_effects": "Constipation, bloating",
-        "manufacturer": "Torrent Pharmaceuticals Ltd",
-        "category": "Calcium Supplement"
-    }
-]
+Sources:
+  1. ml/data/raw/indian_pharmaceutical_products_clean.csv  (253k rows)
+  2. ml/data/raw/medicine_data.csv                         (195k rows)
+"""
+import csv
+import os
+import ast
+import sys
+
+# Ensure we can import from the backend package
+sys.path.insert(0, os.path.dirname(__file__))
+
+from sqlalchemy.orm import Session
+from database import SessionLocal
+from models import DrugInformation
+
+# Paths (relative to project root)
+BASE = os.path.dirname(os.path.dirname(__file__))
+PHARMA_CSV = os.path.join(BASE, "ml", "data", "raw", "indian_pharmaceutical_products_clean.csv")
+MEDICINE_CSV = os.path.join(BASE, "ml", "data", "raw", "medicine_data.csv")
+
+
+def parse_pharma_csv():
+    """
+    Parse indian_pharmaceutical_products_clean.csv
+    Columns: product_id, brand_name, manufacturer, price_inr, is_discontinued,
+             dosage_form, pack_size, pack_unit, num_active_ingredients,
+             primary_ingredient, primary_strength, active_ingredients,
+             therapeutic_class, packaging_raw, manufacturer_raw
+    """
+    drugs = {}
+    if not os.path.exists(PHARMA_CSV):
+        print(f"[Seed] Pharma CSV not found at {PHARMA_CSV}, skipping.")
+        return drugs
+
+    with open(PHARMA_CSV, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            # Skip discontinued
+            if row.get("is_discontinued", "").strip().lower() == "true":
+                continue
+
+            brand = row.get("brand_name", "").strip()
+            if not brand:
+                continue
+
+            # Deduplicate by normalized brand name
+            key = brand.lower()
+            if key in drugs:
+                continue
+
+            # Parse active_ingredients list
+            composition = ""
+            try:
+                ingredients = ast.literal_eval(row.get("active_ingredients", "[]"))
+                if isinstance(ingredients, list):
+                    composition = " + ".join(
+                        ing.get("full_description", ing.get("name", ""))
+                        for ing in ingredients
+                    )
+            except:
+                composition = row.get("primary_ingredient", "")
+                strength = row.get("primary_strength", "")
+                if strength:
+                    composition += f" ({strength})"
+
+            category = row.get("therapeutic_class", "").strip().title()
+            manufacturer = row.get("manufacturer", "").strip()
+            generic = row.get("primary_ingredient", "").strip()
+
+            drugs[key] = {
+                "brand_name": brand,
+                "generic_name": generic,
+                "composition": composition,
+                "usage": None,  # Will be enriched from medicine_data.csv
+                "side_effects": None,
+                "manufacturer": manufacturer,
+                "category": category if category else None,
+            }
+
+    print(f"[Seed] Parsed {len(drugs)} unique medicines from pharma CSV.")
+    return drugs
+
+
+def enrich_from_medicine_csv(drugs):
+    """
+    Enrich with descriptions and side effects from medicine_data.csv
+    Columns: sub_category, product_name, salt_composition, product_price,
+             product_manufactured, medicine_desc, side_effects, drug_interactions
+    """
+    if not os.path.exists(MEDICINE_CSV):
+        print(f"[Seed] Medicine CSV not found at {MEDICINE_CSV}, skipping enrichment.")
+        return drugs
+
+    enriched_count = 0
+    new_count = 0
+
+    with open(MEDICINE_CSV, "r", encoding="utf-8", errors="replace") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            product = row.get("product_name", "").strip()
+            if not product:
+                continue
+
+            key = product.lower()
+
+            if key in drugs:
+                # Enrich existing entry
+                if not drugs[key]["usage"] and row.get("medicine_desc"):
+                    desc = row["medicine_desc"].strip()
+                    # Truncate very long descriptions
+                    drugs[key]["usage"] = desc[:500] if len(desc) > 500 else desc
+                    enriched_count += 1
+                if not drugs[key]["side_effects"] and row.get("side_effects"):
+                    se = row["side_effects"].strip()
+                    drugs[key]["side_effects"] = se[:500] if len(se) > 500 else se
+            else:
+                # Add as new entry
+                salt = row.get("salt_composition", "").strip()
+                desc = row.get("medicine_desc", "").strip()
+                se = row.get("side_effects", "").strip()
+                mfr = row.get("product_manufactured", "").strip()
+                cat = row.get("sub_category", "").strip().title()
+
+                drugs[key] = {
+                    "brand_name": product,
+                    "generic_name": salt[:200] if salt else None,
+                    "composition": salt[:300] if salt else None,
+                    "usage": desc[:500] if desc else None,
+                    "side_effects": se[:500] if se else None,
+                    "manufacturer": mfr if mfr else None,
+                    "category": cat if cat else None,
+                }
+                new_count += 1
+
+    print(f"[Seed] Enriched {enriched_count} entries from medicine CSV, added {new_count} new entries.")
+    return drugs
+
 
 def seed_db():
-    print("Starting database seed for Drug Information...")
+    print("=" * 60)
+    print("  AuthChecker Drug Database Seeder")
+    print("=" * 60)
+
     db: Session = SessionLocal()
     try:
-        # Check if already seeded
-        existing_count = db.query(DrugInformation).count()
-        if existing_count > 0:
-            print(f"Database already contains {existing_count} drug records. Skipping seed.")
-            return
+        existing = db.query(DrugInformation).count()
+        if existing > 0:
+            print(f"\n[Seed] Clearing existing {existing} records to reseed...")
+            db.query(DrugInformation).delete()
+            db.commit()
 
-        for drug in MEDICINES_DATA:
-            new_drug = DrugInformation(**drug)
-            db.add(new_drug)
-        
-        db.commit()
-        print(f"Successfully seeded {len(MEDICINES_DATA)} medicine records.")
+        # Step 1: Parse pharma CSV
+        drugs = parse_pharma_csv()
+
+        # Step 2: Enrich from medicine CSV
+        drugs = enrich_from_medicine_csv(drugs)
+
+        # Step 3: Filter out entries with no useful data
+        filtered = {
+            k: v for k, v in drugs.items()
+            if v["brand_name"] and (v["composition"] or v["generic_name"])
+        }
+        print(f"\n[Seed] Total unique medicines after filtering: {len(filtered)}")
+
+        # Step 4: Insert in batches
+        BATCH_SIZE = 500
+        entries = list(filtered.values())
+        total_inserted = 0
+
+        for i in range(0, len(entries), BATCH_SIZE):
+            batch = entries[i:i + BATCH_SIZE]
+            for drug_data in batch:
+                db.add(DrugInformation(**drug_data))
+            db.commit()
+            total_inserted += len(batch)
+            if total_inserted % 5000 == 0 or total_inserted == len(entries):
+                print(f"  Inserted {total_inserted}/{len(entries)}...")
+
+        print(f"\n[Seed] Successfully seeded {total_inserted} medicine records!")
+        print("=" * 60)
 
     except Exception as e:
         db.rollback()
-        print(f"Error seeding database: {e}")
+        print(f"\n[Seed ERROR] {e}")
+        import traceback
+        traceback.print_exc()
     finally:
         db.close()
+
 
 if __name__ == "__main__":
     seed_db()
