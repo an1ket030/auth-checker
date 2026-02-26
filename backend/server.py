@@ -199,6 +199,7 @@ class UserResponse(BaseModel):
     email: str
     is_verified: bool = False
     access_token: str
+    refresh_token: str
     token_type: str
 
 class HistoryItem(BaseModel):
@@ -227,10 +228,17 @@ class ResetPasswordRequest(BaseModel):
             raise ValueError("Password must contain at least one number")
         return v
 
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
 # ---- Helpers ----
 def generate_otp(length: int = 6) -> str:
     """Generate a random numeric OTP."""
     return ''.join(random.choices(string.digits, k=length))
+
+def generate_refresh_token(length: int = 40) -> str:
+    """Generate a long, secure refresh token."""
+    return secrets.token_urlsafe(length)
 
 def generate_reset_token(length: int = 8) -> str:
     """Generate a short alphanumeric reset token."""
@@ -270,13 +278,28 @@ def register_user(request: Request, user: UserRegister, db: Session = Depends(ge
     send_verification_email(new_user.email, otp, new_user.username)
     print(f"[Auth] Verification OTP sent to {new_user.email}")
 
+    # Create token pair
     access_token = create_access_token(data={"sub": new_user.username})
+    refresh_token = generate_refresh_token()
+    
+    # Store session
+    session = UserSession(
+        user_id=new_user.id,
+        refresh_token=refresh_token,
+        device_info=request.headers.get("user-agent", "Unknown Device"),
+        ip_address=request.client.host if request.client else "Unknown IP",
+        expires_at=datetime.utcnow() + timedelta(days=7)
+    )
+    db.add(session)
+    db.commit()
+
     return {
         "id": new_user.id,
         "username": new_user.username,
         "email": new_user.email,
         "is_verified": False,
         "access_token": access_token,
+        "refresh_token": refresh_token,
         "token_type": "bearer"
     }
 
@@ -400,17 +423,120 @@ def login_user(request: Request, user: UserLogin, db: Session = Depends(get_db))
 
     # Update last login timestamp
     db_user.last_login_at = datetime.utcnow()
+
+    # Create token pair
+    access_token = create_access_token(data={"sub": db_user.username})
+    refresh_token = generate_refresh_token()
+    
+    # Store session
+    session = UserSession(
+        user_id=db_user.id,
+        refresh_token=refresh_token,
+        device_info=request.headers.get("user-agent", "Unknown Device"),
+        ip_address=request.client.host if request.client else "Unknown IP",
+        expires_at=datetime.utcnow() + timedelta(days=7)
+    )
+    db.add(session)
     db.commit()
 
-    access_token = create_access_token(data={"sub": db_user.username})
     return {
         "id": db_user.id,
         "username": db_user.username,
         "email": db_user.email,
         "is_verified": db_user.is_verified or False,
         "access_token": access_token,
+        "refresh_token": refresh_token,
         "token_type": "bearer"
     }
+
+
+@app.post("/api/v1/refresh")
+def refresh_token(request: Request, body: RefreshRequest, db: Session = Depends(get_db)):
+    """Exchange a valid refresh token for a new access+refresh token pair."""
+    # Find session
+    session = db.query(UserSession).filter(
+        UserSession.refresh_token == body.refresh_token,
+        UserSession.revoked == False
+    ).first()
+    
+    if not session or session.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
+
+    # Revoke old token (rotation)
+    session.revoked = True
+    
+    # Get user
+    user = session.user
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    # Generate new token pair
+    access_token = create_access_token(data={"sub": user.username})
+    new_refresh_token = generate_refresh_token()
+    
+    # Create new session
+    new_session = UserSession(
+        user_id=user.id,
+        refresh_token=new_refresh_token,
+        device_info=request.headers.get("user-agent", "Unknown Device"),
+        ip_address=request.client.host if request.client else "Unknown IP",
+        expires_at=datetime.utcnow() + timedelta(days=7)
+    )
+    db.add(new_session)
+    db.commit()
+
+    return {
+        "access_token": access_token,
+        "refresh_token": new_refresh_token,
+        "token_type": "bearer"
+    }
+
+
+@app.post("/api/v1/logout")
+def logout_user(request: Request, body: RefreshRequest, db: Session = Depends(get_db)):
+    """Revoke the current refresh token."""
+    session = db.query(UserSession).filter(
+        UserSession.refresh_token == body.refresh_token
+    ).first()
+    if session:
+        session.revoked = True
+        db.commit()
+    return {"message": "Logged out successfully"}
+
+
+@app.get("/api/v1/sessions")
+def get_sessions(current_user: Users = Depends(get_current_user), db: Session = Depends(get_db)):
+    """List active sessions for the user."""
+    sessions = db.query(UserSession).filter(
+        UserSession.user_id == current_user.id,
+        UserSession.revoked == False,
+        UserSession.expires_at > datetime.utcnow()
+    ).order_by(UserSession.created_at.desc()).all()
+    
+    return [
+        {
+            "id": s.id,
+            "device_info": s.device_info,
+            "ip_address": s.ip_address,
+            "created_at": s.created_at,
+            "expires_at": s.expires_at
+        } for s in sessions
+    ]
+
+
+@app.delete("/api/v1/sessions/{session_id}")
+def revoke_session(session_id: int, current_user: Users = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Revoke a specific session."""
+    session = db.query(UserSession).filter(
+        UserSession.id == session_id,
+        UserSession.user_id == current_user.id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    session.revoked = True
+    db.commit()
+    return {"message": "Session revoked"}
 
 @app.get("/api/v1/history", response_model=List[HistoryItem])
 def get_history(current_user: Users = Depends(get_current_user), db: Session = Depends(get_db)):
