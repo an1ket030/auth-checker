@@ -15,6 +15,7 @@ import httpx
 
 from .middleware import SecurityHeadersMiddleware, RequestLoggingMiddleware
 from .email_service import send_verification_email, send_password_reset_email
+from .storage import upload_image_to_r2, delete_image_from_r2
 from .models import (
     Users, ValidMedicine, ScanHistory, ScanStatus,
     EmailVerification, PasswordReset, UserSession,
@@ -105,32 +106,7 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="AuthChecker Production API")
 
-# -- Background Cleanup Task --
-import asyncio
-import time
-
-async def cleanup_old_uploads():
-    """Delete files in uploads/ older than 24 hours."""
-    while True:
-        try:
-            upload_dir = "uploads"
-            if os.path.exists(upload_dir):
-                now = time.time()
-                for f in os.listdir(upload_dir):
-                    fpath = os.path.join(upload_dir, f)
-                    if os.path.isfile(fpath):
-                        # Delete if older than 24h (86400 seconds)
-                        if os.stat(fpath).st_mtime < now - 86400:
-                            os.remove(fpath)
-                            print(f"[Cleanup] Deleted old file: {f}")
-            await asyncio.sleep(3600) # Check every hour
-        except Exception as e:
-            print(f"[Cleanup Error]: {e}")
-            await asyncio.sleep(3600)
-
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(cleanup_old_uploads())
+# (Removed background local upload cleanup task; moving to cloud storage)
 
 app.add_middleware(
     CORSMiddleware,
@@ -677,16 +653,20 @@ async def scan_medicine(
         if not filename.endswith(('.jpg', '.jpeg', '.png', '.webp')):
              raise HTTPException(status_code=400, detail="Invalid file type. Only JPG, PNG, WEBP allowed.")
 
-        # Save upload to temp file for debugging/logging (optional)
-        file_location = f"uploads/{file.filename}"
-        os.makedirs("uploads", exist_ok=True)
-        
         # Read file bytes
         image_bytes = await file.read()
         print(f"[Scan] Received image: {filename}, size: {len(image_bytes)} bytes")
         
-        with open(file_location, "wb+") as file_object:
-            file_object.write(image_bytes)
+        # Upload to Cloudflare R2
+        r2_url = upload_image_to_r2(image_bytes, filename, file.content_type or "image/jpeg")
+        
+        if not r2_url:
+            # Fallback for local dev if R2 is not configured
+            file_location = f"uploads/{file.filename}"
+            os.makedirs("uploads", exist_ok=True)
+            with open(file_location, "wb+") as file_object:
+                file_object.write(image_bytes)
+            r2_url = file_location
 
         # 1) ML Inference via HuggingFace Space
         print(f"[Scan] Calling HF Space at {HF_SPACE_URL}/predict")
@@ -730,7 +710,7 @@ async def scan_medicine(
             scanned_batch_number="ML_SCAN" , # Legacy field
             authenticity_score=score,
             status=final_status,
-            image_path=file_location,
+            image_path=r2_url,
             ml_confidence=confidence,
             ml_model_version="efficientnet-b3",
             result_breakdown_json=json.dumps(ml_result)
