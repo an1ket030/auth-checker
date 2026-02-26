@@ -11,12 +11,15 @@ import os
 import ast
 import sys
 
-# Ensure we can import from the backend package
-sys.path.insert(0, os.path.dirname(__file__))
-
-from sqlalchemy.orm import Session
-from database import SessionLocal
-from models import DrugInformation
+# Support both standalone execution and module import
+try:
+    from .database import SessionLocal
+    from .models import DrugInformation
+except ImportError:
+    # Standalone execution from backend/ directory
+    sys.path.insert(0, os.path.dirname(__file__))
+    from database import SessionLocal
+    from models import DrugInformation
 
 # Paths (relative to project root)
 BASE = os.path.dirname(os.path.dirname(__file__))

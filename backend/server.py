@@ -124,6 +124,28 @@ app.add_middleware(RequestLoggingMiddleware)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# ---- Auto-seed drug database on startup if empty ----
+@app.on_event("startup")
+def auto_seed_drugs():
+    """Seed the drug_information table from CSVs if it's empty."""
+    db = SessionLocal()
+    try:
+        count = db.query(DrugInformation).count()
+        if count == 0:
+            print("[Startup] drug_information table is empty — running auto-seed...")
+            db.close()  # Close before seed_drugs opens its own session
+            from .seed_drugs import seed_db
+            seed_db()
+        else:
+            print(f"[Startup] drug_information already has {count} records, skipping seed.")
+    except Exception as e:
+        print(f"[Startup] Auto-seed check failed: {e}")
+    finally:
+        try:
+            db.close()
+        except:
+            pass
+
 async def call_ml_inference(image_bytes: bytes, filename: str = "scan.jpg"):
     """Forward image to HuggingFace Space for ML inference."""
     try:
