@@ -368,6 +368,56 @@ python -m ml.training.train --config ml/training/config.yaml
 - All backend tests still pass
 - No OCR-related code remains in the codebase
 
+## Phase 1.5: Serverless ML Deployment — HuggingFace Spaces ✅
+
+> **Goal:** Move ML inference off Render (512MB RAM, OOM crashes) to a dedicated free-tier inference host with sufficient resources (16GB RAM).
+
+### Why This Phase Exists
+
+The EfficientNet-B3 model requires ~800MB RAM to load plus peak inference spikes. Render Free Tier only provides 512MB, causing instant OOM kills during model loading. AWS Lambda was considered but ruled out due to account constraints. HuggingFace Spaces provides free Docker hosting with 16GB RAM and no credit card requirement.
+
+### Architecture Decision
+
+**Split Architecture:**
+- **Render (Free):** Auth, users, database, scan history, API gateway
+- **HuggingFace Space (Free):** ML inference only — receives image, returns `{label, confidence}`
+
+```
+Phone → Render (/scan) → HuggingFace Space (/predict) → Render → Phone
+```
+
+### Files Created
+
+| File | Purpose |
+|------|---------|
+| `hf_space/app.py` | FastAPI with `/predict` and `/health` endpoints |
+| `hf_space/inference_engine.py` | Self-contained EfficientNet-B3 inference engine |
+| `hf_space/config.yaml` | Model architecture config (inference-only) |
+| `hf_space/requirements.txt` | CPU-only PyTorch + FastAPI + dependencies |
+| `hf_space/Dockerfile` | Python 3.9-slim, non-root user, port 7860 |
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `backend/server.py` | Replaced local `MLInferenceEngine` with `httpx` call to HF Space |
+| `requirements.txt` | Removed PyTorch/torchvision/sklearn; added `httpx` |
+| `mobile/src/screens/HomeScreen.js` | Axios timeout → 30s for cold starts |
+
+### Environment Variables
+
+| Key | Value | Where |
+|-----|-------|-------|
+| `HF_SPACE_URL` | `https://Aki030-auth-checker-ml.hf.space` | Render Dashboard |
+
+### Acceptance Criteria
+
+- [x] HuggingFace Space builds and `/health` returns 200
+- [x] `/predict` returns correct ML predictions
+- [x] Render builds without PyTorch (fast builds, no OOM)
+- [x] `HF_SPACE_URL` env var configured on Render
+- [ ] Keep-alive ping configured (UptimeRobot) to prevent sleep
+
 ---
 
 ## Phase 2: Core Platform Upgrades (Weeks 7–10)
