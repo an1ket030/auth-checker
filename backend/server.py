@@ -11,11 +11,10 @@ from typing import List, Optional
 import re
 import traceback
 import io
+import httpx
 
-from ml.inference.engine import MLInferenceEngine
-
-# Initialize ML Engine
-# ML Engine initialized lazily below
+# ML Inference is handled by HuggingFace Space (external service)
+HF_SPACE_URL = os.getenv("HF_SPACE_URL", "http://localhost:7860")
 
 # pyzbar removed due to deployment constraints (libzbar0 missing on Render Python env)
 
@@ -136,15 +135,23 @@ app.add_middleware(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# ml_engine initialized lazily
-_ml_engine_instance = None
-
-def get_ml_engine():
-    global _ml_engine_instance
-    if _ml_engine_instance is None:
-        print("Lazy loading ML Engine...")
-        _ml_engine_instance = MLInferenceEngine()
-    return _ml_engine_instance
+async def call_ml_inference(image_bytes: bytes, filename: str = "scan.jpg"):
+    """Forward image to HuggingFace Space for ML inference."""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            files = {"file": (filename, image_bytes, "image/jpeg")}
+            response = await client.post(f"{HF_SPACE_URL}/predict", files=files)
+            response.raise_for_status()
+            return response.json()
+    except httpx.TimeoutException:
+        print("[ML] HuggingFace Space timed out (cold start?)")
+        return {"label": "ERROR", "confidence": 0.0, "reason": "ML service timed out. Please try again."}
+    except httpx.HTTPStatusError as e:
+        print(f"[ML] HuggingFace Space returned {e.response.status_code}: {e.response.text}")
+        return {"label": "ERROR", "confidence": 0.0, "reason": f"ML service error: {e.response.status_code}"}
+    except Exception as e:
+        print(f"[ML] Failed to reach HuggingFace Space: {e}")
+        return {"label": "ERROR", "confidence": 0.0, "reason": str(e)}
 
 from pydantic import BaseModel, validator, EmailStr
 
@@ -317,10 +324,13 @@ async def scan_medicine(
         with open(file_location, "wb+") as file_object:
             file_object.write(image_bytes)
 
-        # 1) ML Inference
-        # Predict using the new ML Engine (Lazy Load)
-        ml_engine = get_ml_engine()
-        ml_result = ml_engine.predict(image_bytes)
+        # 1) ML Inference via HuggingFace Space
+        ml_result = await call_ml_inference(image_bytes, filename)
+        
+        # Check if ML service returned an error
+        if ml_result.get('label') == 'ERROR':
+            reason = ml_result.get('reason', 'ML inference failed')
+            raise HTTPException(status_code=503, detail=reason)
         
         final_status = ml_result['label'] # "AUTHENTIC" or "FAKE"
         confidence = ml_result['confidence']
