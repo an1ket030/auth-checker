@@ -227,6 +227,25 @@ class DrugResponse(BaseModel):
 class RefreshRequest(BaseModel):
     refresh_token: str
 
+class ReportCreate(BaseModel):
+    scan_id: int
+    description: Optional[str] = None
+    pharmacy_name: Optional[str] = None
+    pharmacy_location: Optional[str] = None
+    geo_lat: Optional[float] = None
+    geo_long: Optional[float] = None
+
+class ReportResponse(BaseModel):
+    id: int
+    scan_id: int
+    description: Optional[str] = None
+    pharmacy_name: Optional[str] = None
+    pharmacy_location: Optional[str] = None
+    geo_lat: Optional[float] = None
+    geo_long: Optional[float] = None
+    status: str
+    reported_at: str
+
 # ---- Helpers ----
 def generate_otp(length: int = 6) -> str:
     """Generate a random numeric OTP."""
@@ -784,3 +803,94 @@ def get_drug_detail(drug_id: int, db: Session = Depends(get_db)):
     if not drug:
         raise HTTPException(status_code=404, detail="Drug information not found")
     return drug
+
+# ---- Counterfeit Reporting Endpoints ----
+
+@app.post("/api/v1/reports", response_model=ReportResponse)
+def submit_report(
+    report: ReportCreate,
+    current_user: Users = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Submit a counterfeit report linked to a scan."""
+    # Verify the scan exists and belongs to the user
+    scan = db.query(ScanHistory).filter(
+        ScanHistory.id == report.scan_id,
+        ScanHistory.user_id == current_user.id
+    ).first()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+
+    new_report = CounterfeitReport(
+        user_id=current_user.id,
+        scan_id=report.scan_id,
+        description=report.description,
+        pharmacy_name=report.pharmacy_name,
+        pharmacy_location=report.pharmacy_location,
+        geo_lat=report.geo_lat,
+        geo_long=report.geo_long,
+        status="pending"
+    )
+    db.add(new_report)
+    db.commit()
+    db.refresh(new_report)
+    return {
+        "id": new_report.id,
+        "scan_id": new_report.scan_id,
+        "description": new_report.description,
+        "pharmacy_name": new_report.pharmacy_name,
+        "pharmacy_location": new_report.pharmacy_location,
+        "geo_lat": new_report.geo_lat,
+        "geo_long": new_report.geo_long,
+        "status": new_report.status,
+        "reported_at": new_report.reported_at.strftime("%Y-%m-%d %H:%M") if new_report.reported_at else ""
+    }
+
+@app.get("/api/v1/reports", response_model=List[ReportResponse])
+def get_reports(
+    current_user: Users = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get all reports submitted by the current user."""
+    reports = db.query(CounterfeitReport).filter(
+        CounterfeitReport.user_id == current_user.id
+    ).order_by(CounterfeitReport.reported_at.desc()).all()
+    return [
+        {
+            "id": r.id,
+            "scan_id": r.scan_id,
+            "description": r.description,
+            "pharmacy_name": r.pharmacy_name,
+            "pharmacy_location": r.pharmacy_location,
+            "geo_lat": r.geo_lat,
+            "geo_long": r.geo_long,
+            "status": r.status,
+            "reported_at": r.reported_at.strftime("%Y-%m-%d %H:%M") if r.reported_at else ""
+        }
+        for r in reports
+    ]
+
+@app.get("/api/v1/reports/{report_id}", response_model=ReportResponse)
+def get_report_detail(
+    report_id: int,
+    current_user: Users = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get details of a specific report."""
+    report = db.query(CounterfeitReport).filter(
+        CounterfeitReport.id == report_id,
+        CounterfeitReport.user_id == current_user.id
+    ).first()
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return {
+        "id": report.id,
+        "scan_id": report.scan_id,
+        "description": report.description,
+        "pharmacy_name": report.pharmacy_name,
+        "pharmacy_location": report.pharmacy_location,
+        "geo_lat": report.geo_lat,
+        "geo_long": report.geo_long,
+        "status": report.status,
+        "reported_at": report.reported_at.strftime("%Y-%m-%d %H:%M") if report.reported_at else ""
+    }
