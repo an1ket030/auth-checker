@@ -13,13 +13,23 @@ import traceback
 import io
 import httpx
 
+from .middleware import SecurityHeadersMiddleware, RequestLoggingMiddleware
+from .email_service import send_verification_email, send_password_reset_email
+from .models import (
+    Users, ValidMedicine, ScanHistory, ScanStatus,
+    EmailVerification, PasswordReset, UserSession,
+    DrugInformation, CounterfeitReport
+)
+import random
+import string
+import secrets
+
 # ML Inference is handled by HuggingFace Space (external service)
 HF_SPACE_URL = os.getenv("HF_SPACE_URL", "http://localhost:7860")
 
 # pyzbar removed due to deployment constraints (libzbar0 missing on Render Python env)
 
 from .database import engine, get_db, Base
-from .models import ValidMedicine, ScanHistory, ScanStatus, Users
 
 # Security Imports
 from passlib.context import CryptContext
@@ -43,7 +53,7 @@ if not SECRET_KEY:
     print("WARNING: Using default insecure key for development.")
     SECRET_KEY = "supersecretkey123"
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 600
+ACCESS_TOKEN_EXPIRE_MINUTES = 60  # Reduced from 600; refresh tokens will handle re-auth
 
 # pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 from passlib.hash import pbkdf2_sha256
@@ -130,6 +140,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Security headers (nosniff, HSTS, X-Frame-Options, etc.)
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RequestLoggingMiddleware)
+
 # Add Rate Limiter Exception Handler
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -152,7 +166,7 @@ async def call_ml_inference(image_bytes: bytes, filename: str = "scan.jpg"):
         print(f"[ML] Failed to reach HuggingFace Space: {e}")
         return {"label": "ERROR", "confidence": 0.0, "reason": str(e)}
 
-from pydantic import BaseModel, validator, EmailStr
+from pydantic import BaseModel, validator
 
 # ---- Pydantic models ----
 class UserLogin(BaseModel):
@@ -166,8 +180,6 @@ class UserRegister(BaseModel):
 
     @validator("email")
     def validate_email(cls, v):
-        # Basic regex or use EmailStr if email-validator installed
-        # Using regex for dependency-free robustness
         pattern = r"^[\w\.-]+@[\w\.-]+\.\w+$"
         if not re.match(pattern, v):
             raise ValueError("Invalid email format")
@@ -183,10 +195,9 @@ class UserRegister(BaseModel):
 
 class UserResponse(BaseModel):
     id: int
-class UserResponse(BaseModel):
-    id: int
     username: str
     email: str
+    is_verified: bool = False
     access_token: str
     token_type: str
 
@@ -196,54 +207,208 @@ class HistoryItem(BaseModel):
     date: str
     score: float
 
+class VerifyEmailRequest(BaseModel):
+    email: str
+    otp_code: str
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+class ResetPasswordRequest(BaseModel):
+    email: str
+    reset_token: str
+    new_password: str
+
+    @validator("new_password")
+    def validate_password(cls, v):
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters long")
+        if not re.search(r"[0-9]", v):
+            raise ValueError("Password must contain at least one number")
+        return v
+
 # ---- Helpers ----
-MONTH_MAP = {
-    'JAN':1, 'FEB':2, 'MAR':3, 'APR':4, 'MAY':5, 'JUN':6,
-    'JUL':7, 'AUG':8, 'SEP':9, 'SEPT':9, 'OCT':10, 'NOV':11, 'DEC':12
-}
+def generate_otp(length: int = 6) -> str:
+    """Generate a random numeric OTP."""
+    return ''.join(random.choices(string.digits, k=length))
 
-
-
-# --- barcode decode helper
-# decode_barcode_from_bytes removed
+def generate_reset_token(length: int = 8) -> str:
+    """Generate a short alphanumeric reset token."""
+    return secrets.token_urlsafe(length)[:length].upper()
 
 # ---- Routes ----
 @app.post("/api/v1/register", response_model=UserResponse)
-@limiter.limit("5/minute") # Rate limit: 5 per minute per IP
+@limiter.limit("5/minute")
 def register_user(request: Request, user: UserRegister, db: Session = Depends(get_db)):
-    db_user = db.query(Users).filter(Users.username == user.username).first()
-    if db_user:
+    # Check username uniqueness
+    if db.query(Users).filter(Users.username == user.username).first():
         raise HTTPException(status_code=400, detail="Username already registered")
-    
+    # Check email uniqueness
+    if db.query(Users).filter(Users.email == user.email).first():
+        raise HTTPException(status_code=400, detail="Email already registered")
+
     hashed_password = get_password_hash(user.password)
-    new_user = Users(username=user.username, email=user.email, password_hash=hashed_password)
+    new_user = Users(
+        username=user.username,
+        email=user.email,
+        password_hash=hashed_password,
+        is_verified=False
+    )
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
-    
+
+    # Send verification OTP
+    otp = generate_otp()
+    verification = EmailVerification(
+        user_id=new_user.id,
+        otp_code=otp,
+        expires_at=datetime.utcnow() + timedelta(minutes=15)
+    )
+    db.add(verification)
+    db.commit()
+    send_verification_email(new_user.email, otp, new_user.username)
+    print(f"[Auth] Verification OTP sent to {new_user.email}")
+
     access_token = create_access_token(data={"sub": new_user.username})
     return {
-        "id": new_user.id, 
-        "username": new_user.username, 
+        "id": new_user.id,
+        "username": new_user.username,
         "email": new_user.email,
+        "is_verified": False,
         "access_token": access_token,
         "token_type": "bearer"
     }
 
+
+@app.post("/api/v1/verify-email")
+@limiter.limit("10/minute")
+def verify_email(request: Request, body: VerifyEmailRequest, db: Session = Depends(get_db)):
+    """Verify user email with OTP code."""
+    user = db.query(Users).filter(Users.email == body.email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.is_verified:
+        return {"message": "Email already verified"}
+
+    # Find the latest non-expired, unused OTP
+    verification = (
+        db.query(EmailVerification)
+        .filter(
+            EmailVerification.user_id == user.id,
+            EmailVerification.otp_code == body.otp_code,
+            EmailVerification.verified == False,
+            EmailVerification.expires_at > datetime.utcnow()
+        )
+        .order_by(EmailVerification.created_at.desc())
+        .first()
+    )
+    if not verification:
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP code")
+
+    # Mark as verified
+    verification.verified = True
+    user.is_verified = True
+    db.commit()
+    print(f"[Auth] Email verified for {user.email}")
+    return {"message": "Email verified successfully"}
+
+
+@app.post("/api/v1/resend-verification")
+@limiter.limit("3/hour")
+def resend_verification(request: Request, body: ForgotPasswordRequest, db: Session = Depends(get_db)):
+    """Resend verification OTP. Rate limited to 3 per hour."""
+    user = db.query(Users).filter(Users.email == body.email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.is_verified:
+        return {"message": "Email already verified"}
+
+    otp = generate_otp()
+    verification = EmailVerification(
+        user_id=user.id,
+        otp_code=otp,
+        expires_at=datetime.utcnow() + timedelta(minutes=15)
+    )
+    db.add(verification)
+    db.commit()
+    send_verification_email(user.email, otp, user.username)
+    return {"message": "Verification code sent"}
+
+
+@app.post("/api/v1/forgot-password")
+@limiter.limit("3/hour")
+def forgot_password(request: Request, body: ForgotPasswordRequest, db: Session = Depends(get_db)):
+    """Send password reset token via email."""
+    user = db.query(Users).filter(Users.email == body.email).first()
+    if not user:
+        # Don't reveal if email exists — always return success
+        return {"message": "If this email is registered, you will receive a reset code."}
+
+    token = generate_reset_token()
+    reset = PasswordReset(
+        user_id=user.id,
+        reset_token=token,
+        expires_at=datetime.utcnow() + timedelta(minutes=30)
+    )
+    db.add(reset)
+    db.commit()
+    send_password_reset_email(user.email, token, user.username)
+    print(f"[Auth] Password reset token sent to {user.email}")
+    return {"message": "If this email is registered, you will receive a reset code."}
+
+
+@app.post("/api/v1/reset-password")
+@limiter.limit("5/minute")
+def reset_password(request: Request, body: ResetPasswordRequest, db: Session = Depends(get_db)):
+    """Reset password using token from email."""
+    user = db.query(Users).filter(Users.email == body.email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Find valid reset token
+    reset = (
+        db.query(PasswordReset)
+        .filter(
+            PasswordReset.user_id == user.id,
+            PasswordReset.reset_token == body.reset_token,
+            PasswordReset.used == False,
+            PasswordReset.expires_at > datetime.utcnow()
+        )
+        .order_by(PasswordReset.created_at.desc())
+        .first()
+    )
+    if not reset:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+
+    # Update password
+    user.password_hash = get_password_hash(body.new_password)
+    reset.used = True
+    db.commit()
+    print(f"[Auth] Password reset successful for {user.email}")
+    return {"message": "Password reset successful. You can now log in."}
+
+
 @app.post("/api/v1/login", response_model=UserResponse)
-@limiter.limit("10/minute") # Slightly higher for login
+@limiter.limit("10/minute")
 def login_user(request: Request, user: UserLogin, db: Session = Depends(get_db)):
-    # Try finding by username OR email (if user sends email as username)
-    db_user = db.query(Users).filter((Users.username == user.username) | (Users.email == user.username)).first()
+    db_user = db.query(Users).filter(
+        (Users.username == user.username) | (Users.email == user.username)
+    ).first()
     if not db_user or not verify_password(user.password, db_user.password_hash):
         raise HTTPException(status_code=401, detail="Incorrect username or password")
-    
+
+    # Update last login timestamp
+    db_user.last_login_at = datetime.utcnow()
+    db.commit()
+
     access_token = create_access_token(data={"sub": db_user.username})
     return {
-        "id": db_user.id, 
+        "id": db_user.id,
         "username": db_user.username,
         "email": db_user.email,
-        "access_token": access_token, 
+        "is_verified": db_user.is_verified or False,
+        "access_token": access_token,
         "token_type": "bearer"
     }
 
