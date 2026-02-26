@@ -19,7 +19,6 @@ HF_SPACE_URL = os.getenv("HF_SPACE_URL", "http://localhost:7860")
 # pyzbar removed due to deployment constraints (libzbar0 missing on Render Python env)
 
 from .database import engine, get_db, Base
-from .database import engine, get_db, Base
 from .models import ValidMedicine, ScanHistory, ScanStatus, Users
 
 # Security Imports
@@ -320,12 +319,15 @@ async def scan_medicine(
         
         # Read file bytes
         image_bytes = await file.read()
+        print(f"[Scan] Received image: {filename}, size: {len(image_bytes)} bytes")
         
         with open(file_location, "wb+") as file_object:
             file_object.write(image_bytes)
 
         # 1) ML Inference via HuggingFace Space
+        print(f"[Scan] Calling HF Space at {HF_SPACE_URL}/predict")
         ml_result = await call_ml_inference(image_bytes, filename)
+        print(f"[Scan] ML result: {ml_result}")
         
         # Check if ML service returned an error
         if ml_result.get('label') == 'ERROR':
@@ -380,7 +382,10 @@ async def scan_medicine(
         
 
 
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions as-is
     except Exception as e:
+        print(f"[Scan] UNEXPECTED ERROR: {type(e).__name__}: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 

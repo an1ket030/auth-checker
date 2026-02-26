@@ -29,7 +29,7 @@ def get_engine():
     return _engine
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health():
     """Keep-alive endpoint for UptimeRobot / cron pings."""
     return {"status": "ok"}
