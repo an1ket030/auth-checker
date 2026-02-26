@@ -203,10 +203,20 @@ class UserResponse(BaseModel):
     token_type: str
 
 class HistoryItem(BaseModel):
+    id: int
     product: str
     status: str
     date: str
     score: float
+    ml_confidence: Optional[float] = None
+    image_url: Optional[str] = None
+
+class HistoryDetailResponse(HistoryItem):
+    scanned_batch_number: Optional[str] = None
+    ml_model_version: Optional[str] = None
+    result_breakdown: Optional[dict] = None
+    blockchain_tx_hash: Optional[str] = None
+    nfc_verified: bool = False
 
 class VerifyEmailRequest(BaseModel):
     email: str
@@ -539,27 +549,29 @@ def revoke_session(session_id: int, current_user: Users = Depends(get_current_us
     return {"message": "Session revoked"}
 
 @app.get("/api/v1/history", response_model=List[HistoryItem])
-def get_history(current_user: Users = Depends(get_current_user), db: Session = Depends(get_db)):
+def get_history(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    status: Optional[str] = Query(None),
+    current_user: Users = Depends(get_current_user), 
+    db: Session = Depends(get_db)
+):
     """
-    Return the 10 most recent scans for user_id.
-    Compute status deterministically from authenticity_score to avoid mismatches.
+    Return paginated and optionally filtered scans for the user.
     """
-    scans = db.query(ScanHistory).filter(ScanHistory.user_id == current_user.id).order_by(ScanHistory.scanned_at.desc()).limit(10).all()
+    query = db.query(ScanHistory).filter(
+        ScanHistory.user_id == current_user.id,
+        ScanHistory.deleted_at.is_(None)
+    )
+    
+    if status and status.upper() != "ALL":
+        query = query.filter(ScanHistory.status == status.upper())
+        
+    scans = query.order_by(ScanHistory.scanned_at.desc()).offset(skip).limit(limit).all()
+    
     results = []
     for s in scans:
-        # Use the stored authenticity_score as the canonical value
         score = float(s.authenticity_score) if s.authenticity_score is not None else 0.0
-
-        # Determine label deterministically (mirror compute_trust_score thresholds)
-        # UNIFIED THRESHOLD: 75%
-        if score >= 75:
-            label = ScanStatus.AUTHENTIC.value
-        elif score >= 50:
-            label = ScanStatus.SUSPICIOUS.value
-        elif score >= 25:
-            label = "UNKNOWN"
-        else:
-            label = ScanStatus.FAKE.value
 
         product_name = "Unknown"
         if s.scanned_batch_number and s.scanned_batch_number != "UNKNOWN":
@@ -568,12 +580,73 @@ def get_history(current_user: Users = Depends(get_current_user), db: Session = D
                 product_name = med.brand_name
 
         results.append({
+            "id": s.id,
             "product": product_name if product_name != "Unknown" else f"Batch {s.scanned_batch_number}",
-            "status": label,
+            "status": s.status or ScanStatus.UNKNOWN.value,
             "date": s.scanned_at.strftime("%Y-%m-%d"),
-            "score": round(score, 2)
+            "score": round(score, 2),
+            "ml_confidence": s.ml_confidence,
+            "image_url": s.image_thumbnail_url or s.image_path
         })
     return results
+
+@app.get("/api/v1/history/{history_id}", response_model=HistoryDetailResponse)
+def get_history_detail(history_id: int, current_user: Users = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get detailed information for a specific scan."""
+    scan = db.query(ScanHistory).filter(
+        ScanHistory.id == history_id,
+        ScanHistory.user_id == current_user.id,
+        ScanHistory.deleted_at.is_(None)
+    ).first()
+    
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+        
+    score = float(scan.authenticity_score) if scan.authenticity_score is not None else 0.0
+    product_name = "Unknown"
+    if scan.scanned_batch_number and scan.scanned_batch_number != "UNKNOWN":
+        med = db.query(ValidMedicine).filter(ValidMedicine.batch_number == scan.scanned_batch_number).first()
+        if med:
+            product_name = med.brand_name
+
+    # Parse breakdown JSON safely
+    breakdown = None
+    if scan.result_breakdown_json:
+        try:
+            breakdown = json.loads(scan.result_breakdown_json) if isinstance(scan.result_breakdown_json, str) else scan.result_breakdown_json
+        except:
+            pass
+
+    return {
+        "id": scan.id,
+        "product": product_name if product_name != "Unknown" else f"Batch {scan.scanned_batch_number}",
+        "status": scan.status or ScanStatus.UNKNOWN.value,
+        "date": scan.scanned_at.strftime("%Y-%m-%d"),
+        "score": round(score, 2),
+        "ml_confidence": scan.ml_confidence,
+        "image_url": scan.image_thumbnail_url or scan.image_path,
+        "scanned_batch_number": scan.scanned_batch_number,
+        "ml_model_version": scan.ml_model_version,
+        "result_breakdown": breakdown,
+        "blockchain_tx_hash": scan.blockchain_tx_hash,
+        "nfc_verified": scan.nfc_verified or False
+    }
+
+@app.delete("/api/v1/history/{history_id}")
+def delete_history(history_id: int, current_user: Users = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Soft delete a scan history record."""
+    scan = db.query(ScanHistory).filter(
+        ScanHistory.id == history_id,
+        ScanHistory.user_id == current_user.id,
+        ScanHistory.deleted_at.is_(None)
+    ).first()
+    
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+        
+    scan.deleted_at = datetime.utcnow()
+    db.commit()
+    return {"message": "Scan deleted successfully"}
 
 
 @app.post("/api/v1/scan")
@@ -650,13 +723,17 @@ async def scan_medicine(
         product_name = "Unknown Product" # Placeholder, later can limit scope or use other metadata
         
         # Persist scan history
+        import json
+        
         scan = ScanHistory(
             user_id=current_user.id,
             scanned_batch_number="ML_SCAN" , # Legacy field
             authenticity_score=score,
             status=final_status,
             image_path=file_location,
-            # Store full ML breakdown if possible, for now just status
+            ml_confidence=confidence,
+            ml_model_version="efficientnet-b3",
+            result_breakdown_json=json.dumps(ml_result)
         )
         
         db.add(scan)
