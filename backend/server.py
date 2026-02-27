@@ -13,7 +13,7 @@ import traceback
 import io
 import httpx
 
-from .middleware import SecurityHeadersMiddleware, RequestLoggingMiddleware
+from .middleware import SecurityHeadersMiddleware, RequestLoggingMiddleware, HMACSigningMiddleware
 from .email_service import send_verification_email, send_password_reset_email
 from .storage import upload_image_to_r2, delete_image_from_r2
 from .models import (
@@ -119,6 +119,7 @@ app.add_middleware(
 # Security headers (nosniff, HSTS, X-Frame-Options, etc.)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RequestLoggingMiddleware)
+app.add_middleware(HMACSigningMiddleware, secret_key=SECRET_KEY)
 
 # Add Rate Limiter Exception Handler
 app.state.limiter = limiter
@@ -580,11 +581,14 @@ def get_history(
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
     status: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None, description="Filter from date (YYYY-MM-DD)"),
+    date_to: Optional[str] = Query(None, description="Filter to date (YYYY-MM-DD)"),
+    sort: Optional[str] = Query("date_desc", description="Sort: date_desc, date_asc, score_desc, score_asc"),
     current_user: Users = Depends(get_current_user), 
     db: Session = Depends(get_db)
 ):
     """
-    Return paginated and optionally filtered scans for the user.
+    Return paginated, filtered, and sorted scans for the user.
     """
     query = db.query(ScanHistory).filter(
         ScanHistory.user_id == current_user.id,
@@ -593,8 +597,30 @@ def get_history(
     
     if status and status.upper() != "ALL":
         query = query.filter(ScanHistory.status == status.upper())
-        
-    scans = query.order_by(ScanHistory.scanned_at.desc()).offset(skip).limit(limit).all()
+
+    # Gap 3: Date range filtering
+    if date_from:
+        try:
+            from_date = datetime.strptime(date_from, "%Y-%m-%d")
+            query = query.filter(ScanHistory.scanned_at >= from_date)
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            to_date = datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1)
+            query = query.filter(ScanHistory.scanned_at < to_date)
+        except ValueError:
+            pass
+
+    # Gap 4: Sort parameter
+    sort_map = {
+        "date_desc": ScanHistory.scanned_at.desc(),
+        "date_asc": ScanHistory.scanned_at.asc(),
+        "score_desc": ScanHistory.authenticity_score.desc(),
+        "score_asc": ScanHistory.authenticity_score.asc(),
+    }
+    order = sort_map.get(sort, ScanHistory.scanned_at.desc())
+    scans = query.order_by(order).offset(skip).limit(limit).all()
     
     results = []
     for s in scans:
@@ -690,6 +716,13 @@ async def scan_medicine(
       - file: image file
       - barcode (optional): barcode string scanned on device (helps when barcode region is separate)
     """
+    # Gap 2 fix: Block unverified users from scanning
+    if not getattr(current_user, 'is_verified', False):
+        raise HTTPException(
+            status_code=403,
+            detail="Please verify your email before scanning. Check your inbox for the verification code."
+        )
+
     try:
         # Validate file size (max 5MB)
         file.file.seek(0, 2)
@@ -770,13 +803,31 @@ async def scan_medicine(
         db.add(scan)
         db.commit()
 
+        # Gap 5: Auto-link drug info to scan result
+        drug_info = None
+        if product_name and product_name != "Unknown Product":
+            drug = db.query(DrugInformation).filter(
+                DrugInformation.brand_name.ilike(f"%{product_name}%")
+            ).first()
+            if drug:
+                drug_info = {
+                    "brand_name": drug.brand_name,
+                    "generic_name": drug.generic_name,
+                    "composition": drug.composition,
+                    "usage": drug.usage,
+                    "side_effects": drug.side_effects,
+                    "manufacturer": drug.manufacturer
+                }
+
         return {
             "status": final_status,
             "label": final_status, 
             "score": score,
             "reason": reason,
             "product": product_name,
-            "breakdown": ml_result
+            "scan_id": scan.id,
+            "breakdown": ml_result,
+            "drug_info": drug_info
         }
         
 

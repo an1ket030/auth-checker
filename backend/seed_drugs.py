@@ -170,9 +170,26 @@ def seed_db():
         }
         print(f"\n[Seed] Total unique medicines after filtering: {len(filtered)}")
 
+        # Step 3.5: Limit to top ~5000 most complete entries (for Render free tier performance)
+        MAX_SEED = 5000
+
+        def completeness_score(drug):
+            """Score from 0-5 based on how many fields are filled."""
+            score = 0
+            if drug.get("composition"): score += 1
+            if drug.get("usage"): score += 1
+            if drug.get("side_effects"): score += 1
+            if drug.get("manufacturer"): score += 1
+            if drug.get("category"): score += 1
+            return score
+
+        entries = sorted(filtered.values(), key=completeness_score, reverse=True)
+        if len(entries) > MAX_SEED:
+            print(f"[Seed] Limiting to top {MAX_SEED} most complete entries (from {len(entries)}).")
+            entries = entries[:MAX_SEED]
+
         # Step 4: Insert in batches
         BATCH_SIZE = 500
-        entries = list(filtered.values())
         total_inserted = 0
 
         for i in range(0, len(entries), BATCH_SIZE):
@@ -181,7 +198,7 @@ def seed_db():
                 db.add(DrugInformation(**drug_data))
             db.commit()
             total_inserted += len(batch)
-            if total_inserted % 5000 == 0 or total_inserted == len(entries):
+            if total_inserted % 1000 == 0 or total_inserted == len(entries):
                 print(f"  Inserted {total_inserted}/{len(entries)}...")
 
         print(f"\n[Seed] Successfully seeded {total_inserted} medicine records!")
