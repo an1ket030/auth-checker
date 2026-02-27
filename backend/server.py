@@ -30,7 +30,7 @@ HF_SPACE_URL = os.getenv("HF_SPACE_URL", "http://localhost:7860")
 
 # pyzbar removed due to deployment constraints (libzbar0 missing on Render Python env)
 
-from .database import engine, get_db, Base
+from .database import engine, get_db, Base, SessionLocal
 
 # Security Imports
 from passlib.context import CryptContext
