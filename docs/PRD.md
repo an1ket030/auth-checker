@@ -779,17 +779,19 @@ graph LR
 
 ---
 
-### Phase 2: Core Platform Upgrades (Weeks 7–10)
+### Phase 2: Core Platform Upgrades (Weeks 7–10) ✅
 
 > User management, history, and backend hardening.
 
-- [ ] Implement email verification and password reset.
-- [ ] Add refresh token rotation.
-- [ ] Build comprehensive scan history with pagination, filtering, detail views.
-- [ ] Implement image storage (S3/GCS).
-- [ ] Add drug information lookup feature.
-- [ ] Add counterfeit reporting feature.
-- [ ] Harden all security controls (HTTPS, CORS, secrets).
+- [x] Implement email verification and password reset.
+- [x] Add refresh token rotation.
+- [x] Build comprehensive scan history with pagination, filtering, detail views.
+- [x] Implement image storage (Cloudinary).
+- [x] Add drug information lookup feature (242k+ medicines seeded).
+- [x] Add counterfeit reporting feature.
+- [x] Harden all security controls (HTTPS, CORS, security headers).
+
+> **Audit Note:** 7 minor P2 gaps identified — see [Phase 2 Audit Report](file:///C:/Users/singh/.gemini/antigravity/brain/68e12682-b4cc-414c-af78-badba5ed029b/phase_2_audit_report.md).
 
 ---
 
