@@ -247,6 +247,9 @@ class DrugResponse(BaseModel):
     manufacturer: Optional[str] = None
     category: Optional[str] = None
 
+    class Config:
+        orm_mode = True
+
 class RefreshRequest(BaseModel):
     refresh_token: str
 
@@ -268,6 +271,9 @@ class ReportResponse(BaseModel):
     geo_long: Optional[float] = None
     status: str
     reported_at: str
+
+    class Config:
+        orm_mode = True
 
 # ---- Helpers ----
 def generate_otp(length: int = 6) -> str:
