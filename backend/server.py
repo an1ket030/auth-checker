@@ -100,7 +100,47 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
         raise credentials_exception
     return user
 
-# Legacy imports removed# Force table creation (models must match DB; migrations preferred)
+# ---- Safe auto-migration: add Phase 2 columns if missing ----
+def run_migrations():
+    """Idempotent migration — adds any missing columns to existing tables.
+    Safe to run on every startup (uses ADD COLUMN IF NOT EXISTS).
+    """
+    from sqlalchemy import text
+    migrations = [
+        # Phase 2.1 — users table additions
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP",
+        # Phase 2.3 — scan_history table additions
+        "ALTER TABLE scan_history ADD COLUMN IF NOT EXISTS image_thumbnail_url TEXT",
+        "ALTER TABLE scan_history ADD COLUMN IF NOT EXISTS ml_confidence FLOAT",
+        "ALTER TABLE scan_history ADD COLUMN IF NOT EXISTS ml_model_version VARCHAR(20) DEFAULT 'v1.0'",
+        "ALTER TABLE scan_history ADD COLUMN IF NOT EXISTS result_breakdown_json TEXT",
+        "ALTER TABLE scan_history ADD COLUMN IF NOT EXISTS blockchain_tx_hash VARCHAR(100)",
+        "ALTER TABLE scan_history ADD COLUMN IF NOT EXISTS nfc_verified BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE scan_history ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP",
+        # Phase 2.6 — counterfeit_reports table additions
+        "ALTER TABLE counterfeit_reports ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)",
+        "ALTER TABLE counterfeit_reports ADD COLUMN IF NOT EXISTS pharmacy_name VARCHAR(200)",
+        "ALTER TABLE counterfeit_reports ADD COLUMN IF NOT EXISTS pharmacy_location TEXT",
+        "ALTER TABLE counterfeit_reports ADD COLUMN IF NOT EXISTS geo_lat FLOAT",
+        "ALTER TABLE counterfeit_reports ADD COLUMN IF NOT EXISTS geo_long FLOAT",
+        "ALTER TABLE counterfeit_reports ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'pending'",
+    ]
+    try:
+        with engine.connect() as conn:
+            for sql in migrations:
+                try:
+                    conn.execute(text(sql))
+                except Exception as col_err:
+                    print(f"[Migration] Skipped (likely table missing, will be created): {col_err}")
+            conn.commit()
+        print("[Migration] Phase 2 column migration complete.")
+    except Exception as e:
+        print(f"[Migration] Migration failed (non-fatal): {e}")
+
+run_migrations()
+
 # Force table creation (models must match DB; migrations preferred)
 Base.metadata.create_all(bind=engine)
 
