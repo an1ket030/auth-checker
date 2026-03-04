@@ -310,7 +310,7 @@ def register_user(request: Request, user: UserRegister, db: Session = Depends(ge
     db.commit()
     db.refresh(new_user)
 
-    # Send verification OTP
+    # Send verification OTP (non-fatal — registration succeeds even if email fails)
     otp = generate_otp()
     verification = EmailVerification(
         user_id=new_user.id,
@@ -319,8 +319,14 @@ def register_user(request: Request, user: UserRegister, db: Session = Depends(ge
     )
     db.add(verification)
     db.commit()
-    send_verification_email(new_user.email, otp, new_user.username)
-    print(f"[Auth] Verification OTP sent to {new_user.email}")
+    try:
+        email_sent = send_verification_email(new_user.email, otp, new_user.username)
+        if email_sent:
+            print(f"[Auth] Verification OTP sent to {new_user.email}")
+        else:
+            print(f"[Auth] WARNING: Email send returned False for {new_user.email}. OTP: {otp}")
+    except Exception as email_err:
+        print(f"[Auth] WARNING: Email send threw exception for {new_user.email}: {email_err}. Registration continues.")
 
     # Create token pair
     access_token = create_access_token(data={"sub": new_user.username})
