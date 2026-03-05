@@ -737,6 +737,39 @@ def get_history_detail(history_id: int, current_user: Users = Depends(get_curren
         "nfc_verified": scan.nfc_verified or False
     }
 
+@app.get("/api/v1/analytics")
+def get_analytics(range: str = "week", current_user: Users = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get aggregated analytics for the user's scans."""
+    from sqlalchemy import func
+    
+    # Base query for user's scans
+    base_query = db.query(ScanHistory).filter(
+        ScanHistory.user_id == current_user.id,
+        ScanHistory.deleted_at.is_(None)
+    )
+    
+    # Calculate basic counts
+    total = base_query.count()
+    authentic = base_query.filter(ScanHistory.status == ScanStatus.AUTHENTIC.value).count()
+    suspicious = base_query.filter(ScanHistory.status == ScanStatus.SUSPICIOUS.value).count()
+    fake = base_query.filter(ScanHistory.status == ScanStatus.FAKE.value).count()
+    
+    # Calculate average confidence
+    avg_conf_result = base_query.with_entities(func.avg(ScanHistory.authenticity_score)).scalar()
+    avg_conf = float(avg_conf_result) if avg_conf_result else 0.0
+
+    return {
+        "total_scans": total,
+        "authentic_count": authentic,
+        "suspicious_count": suspicious,
+        "fake_count": fake,
+        "average_confidence": round(avg_conf, 2),
+        "streak_days": 1 if total > 0 else 0,  # Simplified streak logic
+        "scans_by_day": [],  # Can be expanded later if needed
+        "confidence_trend": [],
+        "top_brands": []
+    }
+
 @app.delete("/api/v1/history/{history_id}")
 def delete_history(history_id: int, current_user: Users = Depends(get_current_user), db: Session = Depends(get_db)):
     """Soft delete a scan history record."""
@@ -771,13 +804,13 @@ async def scan_medicine(
     # Note: email verification gate removed — all authenticated users can scan
 
     try:
-        # Validate file size (max 5MB)
+        # Validate file size (max 15MB)
         file.file.seek(0, 2)
         file_size = file.file.tell()
         file.file.seek(0)
         
-        if file_size > 5 * 1024 * 1024:
-            raise HTTPException(status_code=400, detail="File too large (max 5MB)")
+        if file_size > 15 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="File too large (max 15MB)")
             
         # Validate extension
         filename = file.filename.lower()
