@@ -1,7 +1,7 @@
-# AuthChecker — Development Phases Guide
+# Medify (formerly AuthChecker) — Development Phases Guide
 
 **Reference:** [PRD.md](file:///d:/Projects/auth-checker/docs/PRD.md)  
-**Last Updated:** February 16, 2026
+**Last Updated:** March 3, 2026
 
 This document is the **hands-on execution guide** for transforming the AuthChecker MVP into a production-ready application. Each phase is broken down into actionable tasks with technical details, file-level changes, commands to run, acceptance criteria, and dependencies.
 
@@ -604,73 +604,89 @@ Phone → Render (/scan) → HuggingFace Space (/predict) → Render → Phone
 
 ---
 
-## Phase 3: UI/UX Redesign (Weeks 11–14)
+## Phase 3: UI/UX Redesign (Weeks 11–14) 🚧 IN PROGRESS (~65%)
 
 > **Goal:** Transform the app from a developer prototype into a consumer-grade product with premium aesthetics, smooth interactions, and accessibility.
 
-### 3.1 — Figma Design
+> [!NOTE]
+> **Execution Status (March 3, 2026):** App rebranded to **Medify**. Sapphire blue design system implemented. 10 of 13 screens redesigned. 3 new shared components created (GradientButton, StatCard, ScanCard). Bottom tab navigation with scan FAB deployed. 3 screens remain: SplashScreen, OnboardingScreen, AnalyticsScreen. Dark mode tokens defined but not wired. Runtime testing pending.
 
-**Tasks:**
-- Design screens in Figma (or similar):
-  - Onboarding (3-slide intro carousel)
-  - Login / Register (with social login placeholders)
-  - Home Dashboard
-  - Scan Camera / Upload flow
-  - Scan Result (with animation)
-  - Scan History (list + detail)
-  - Analytics Dashboard (charts and visualizations)
-  - Notifications Center
-  - Drug Information
-  - Profile & Settings
-- Define design system:
-  - Color palette (primary, secondary, success, danger, neutral shades)
-  - Typography scale (headings, body, captions)
-  - Component library (buttons, cards, inputs, badges, pills, modals)
-  - Spacing and sizing tokens
-  - Dark mode color palette
+### 3.1 — Design System & Visual Identity ✅
+
+**What was done:**
+- Stitch AI used to generate 10 screen mockups (Figma reference was behind a login wall)
+- Design system implemented in `mobile/src/theme.js`:
+  - Sapphire blue palette (`#2563EB` primary, with light/ultralight/dark variants)
+  - Status colors with background variants (success/warning/danger)
+  - 4px spacing grid, typography scale (h1–caption), font weight tokens
+  - 4 shadow presets (light, medium, strong, card)
+  - Dark mode color tokens (defined but not yet wired)
+- App rebranded: `app.json` updated to "Medify" v2.0.0
+- 7 mascot variations mapped in `MASCOT` object (default, scanning, celebrating, worried, searching, waving, oops)
 
 **Acceptance Criteria:**
-- All screens designed and annotated
-- Design system documented
-- Designs reviewed and approved before implementation
+- ✅ Design system documented in `theme.js`
+- ✅ Color palette, typography, spacing, shadows all tokenized
+- ✅ Designs reviewed via Stitch mockups and approved by user
 
 ---
 
-### 3.2 — Navigation Overhaul
+### 3.2 — Navigation Overhaul ✅
 
-**Tasks:**
-- Implement React Navigation with:
-  - **Auth Stack:** Onboarding → Login / Register → Email Verification
-  - **Main Tab Navigator:** Home | Analytics | (FAB Scan) | Notifications | Profile
-  - **Nested Stacks:** Scan Result, Scan Detail, Drug Info, Report Form, Settings
-- Add smooth screen transitions (slide, fade)
-- Implement deep linking for notification taps
+**What was done:**
+- Installed `@react-navigation/bottom-tabs`
+- `AppNavigator.js` fully rewritten:
+  - **Auth Stack:** Login → VerifyEmail → ForgotPassword
+  - **Main Tab Navigator:** Home | (Scan FAB) | Drug Info | Profile
+  - **Nested Stacks:** ScanDetail, Report, MyReports within Home; all screens accessible
+  - Floating Action Button (FAB) for scan — elevated gradient button above tab bar
+  - Loading state with gradient animation
+
+**Still pending:**
+- 🔲 SplashScreen + OnboardingScreen not yet added to stack
+- 🔲 Smooth screen transitions (slide, fade)
+- 🔲 Deep linking for notification taps
 
 **Acceptance Criteria:**
-- Navigation feels native and fluid
-- Back gestures work correctly on both platforms
-- Tab bar matches Figma design
+- ✅ Tab bar implemented with scan FAB
+- ✅ Nested stack navigators per tab
+- 🔲 Transitions and deep linking pending
 
 ---
 
-### 3.3 — Screen Implementation
+### 3.3 — Screen Implementation 🚧
 
-**Tasks:**
-- Implement all screens from Figma designs
-- Key screen details:
-  - **Onboarding:** Animated carousel with auto-advance, skip button, dot indicators
-  - **Home:** Greeting header, quick action cards, recent scans summary
-  - **Analytics:** Charts and stat cards (see FR-8 in PRD)
-  - **Notifications:** Grouped by date, swipe-to-dismiss, unread indicators
-  - **Profile:** Avatar, stats, settings list, dark mode toggle, logout
-- Implement skeleton loading screens (shimmer effect) for all data-loading states
-- Implement error states with retry buttons
-- Add haptic feedback on key interactions (scan result, button presses)
+**Completed (10 screens):**
+- ✅ **HomeScreen** — Hero scan card (gradient + mascot), quick stats row, quick action grid, filter pills, ScanCard-based history
+- ✅ **LoginScreen** — Mascot header, Login/Register pill toggle, password strength, GradientButton CTA
+- ✅ **ResultScreen** — Color-coded gradient header, TrustRing, mascot speech bubble, analysis breakdown
+- ✅ **ProfileScreen** — Gradient header, avatar ring, verified badge, stat cards, grouped settings
+- ✅ **DrugInfoScreen** — Search bar, category chips, expandable drug cards, mascot empty state
+- ✅ **ReportScreen** — Linked scan card, form fields with icons, GPS capture, mascot message
+- ✅ **ScanDetailScreen** — Gradient header, status banner + TrustRing, product/verification cards
+- ✅ **MyReportsScreen** — Themed report cards, status badges, mascot empty state
+- ✅ **VerifyEmailScreen** — Mascot header, 6-box OTP input, GradientButton CTA
+- ✅ **ForgotPasswordScreen** — Mascot oops, step dots indicator, password visibility toggle
+
+**Not yet built (3 screens):**
+- 🔲 **SplashScreen** — Blue gradient, mascot, progress bar, auto-navigate
+- 🔲 **OnboardingScreen** — 3-slide carousel with mascot, dot indicators, "Get Started"
+- 🔲 **AnalyticsScreen** — Stat cards, donut/bar/line charts (requires charting library)
+
+**Not yet implemented:**
+- 🔲 Skeleton loading screens (shimmer)
+- 🔲 Error states with retry buttons
+- 🔲 Haptic feedback
+
+**New shared components created:**
+- ✅ `GradientButton` — primary/danger/outline variants, loading state
+- ✅ `StatCard` — emoji icon + value + label display card
+- ✅ `ScanCard` — history item with status badge + trust score ring
 
 **Acceptance Criteria:**
-- All screens pixel-perfect match to Figma designs
-- Loading and error states are graceful
-- Animations are smooth (60 fps)
+- ✅ 10/13 screens redesigned to match Stitch mockups
+- 🔲 3 screens + loading/error states still needed
+- 🔲 Runtime verification pending
 
 ---
 
@@ -732,15 +748,18 @@ Phone → Render (/scan) → HuggingFace Space (/predict) → Render → Phone
 
 ---
 
-### 3.6 — Dark Mode & Polish
+### 3.6 — Dark Mode & Polish 🔲
 
-**Tasks:**
-- Create dark color palette in `theme.js`
-- Implement theme context with persistence (AsyncStorage)
-- Add toggle in Settings
-- Ensure all screens and components respect the active theme
-- Comprehensive bug fix pass (test on Android + iOS)
-- Accessibility audit: screen reader labels, touch target sizes (≥ 44×44), contrast ratios
+**Status:** Dark mode color tokens (`darkBg`, `darkSurface`, `darkBorder`, `darkText`, `darkTextSecondary`) are defined in `theme.js` but NOT yet wired to any context, toggle, or screen.
+
+**Remaining tasks:**
+- 🔲 Create `ThemeContext` with persistence (AsyncStorage)
+- 🔲 Add toggle in ProfileScreen settings
+- 🔲 Update all screens/components to use dynamic theme colors
+- 🔲 Comprehensive bug fix pass (test on Android + iOS)
+- 🔲 Accessibility audit: screen reader labels, touch targets (≥ 44×44), contrast ratios
+- 🔲 Delete unused `UI.js` component file
+- 🔲 Compress large mascot PNGs (several are 3–5 MB)
 
 **Acceptance Criteria:**
 - Dark mode looks polished (not just inverted colors)

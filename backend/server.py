@@ -768,12 +768,7 @@ async def scan_medicine(
       - file: image file
       - barcode (optional): barcode string scanned on device (helps when barcode region is separate)
     """
-    # Gap 2 fix: Block unverified users from scanning
-    if not getattr(current_user, 'is_verified', False):
-        raise HTTPException(
-            status_code=403,
-            detail="Please verify your email before scanning. Check your inbox for the verification code."
-        )
+    # Note: email verification gate removed — all authenticated users can scan
 
     try:
         # Validate file size (max 5MB)
