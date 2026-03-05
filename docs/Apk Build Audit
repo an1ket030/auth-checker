@@ -1,0 +1,33 @@
+# Medify pre-Build Audit & Precautions
+
+## 1. Network Requirements: Does it need to be on the same network?
+**Answer: NO.** 
+I have verified that your `src/config.js` is currently pointing to your remote backend:
+`https://auth-checker-qywb.onrender.com/api/v1`
+
+**What this means:** 
+Your APK is now globally linked to your cloud backend. You can install this APK on any phone in the world, use it on 5G/LTE cellular data, or any Wi-Fi network, and it will work perfectly. It is entirely decoupled from your PC's local development environment.
+
+## 2. Testing the Current State
+Before running the EAS build, the best way to do a final test is strictly what we just finished:
+- **Scan Flow:** Confirm taking a photo correctly triggers the inference service on Hugging Face and saves to the Render DB.
+- **Onboarding:** We added Redux/AsyncStorage logic for Splash & Onboarding.
+- **Micro-Interactions:** Haptics and Skeleton loaders are active.
+
+Because `npx expo start` runs exactly the same JS bundle that will be compiled, if it is working flawlessly right now on your Expo Go sandbox (connected to the Render URL), the APK will mirror that behavior exactly.
+
+## 3. Precautions & Things to Keep in Mind
+
+> [!WARNING]
+> **Render "Cold Starts"**
+> If your Render backend is running on the Free Tier, it will "go to sleep" after 15 minutes of inactivity. **The very first time you open the APK and try to log in or fetch the analytics, it might hang for 30–50 seconds.** This is not a bug in the app, it's just the Render server waking up. Subsequent requests will be instant.
+
+> [!NOTE]
+> **Correct Build Command**
+> Because we explicitly skipped Phase 5 (Google Play Console), you want an `.apk` file, not an `.aab` file. I have verified your `eas.json` is correctly set up. 
+> To generate the installable APK, you **MUST** use this exact command:
+> `eas build -p android --profile preview`
+
+> [!IMPORTANT]
+> **Hugging Face API Limits**
+> Remember that the Mobile App still ultimately relies on your Hugging Face Space URL for the ML classification inference. Ensure your Space is running and not paused/sleeping, otherwise scans from the APK will fail with timeout errors.
