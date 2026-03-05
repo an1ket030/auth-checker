@@ -758,16 +758,48 @@ def get_analytics(range: str = "week", current_user: Users = Depends(get_current
     avg_conf_result = base_query.with_entities(func.avg(ScanHistory.authenticity_score)).scalar()
     avg_conf = float(avg_conf_result) if avg_conf_result else 0.0
 
+    from collections import defaultdict
+    
+    scans_by_day_map = defaultdict(int)
+    conf_by_day_map = defaultdict(list)
+    brands_map = defaultdict(int)
+    
+    scans = base_query.all()
+    for scan in scans:
+        date_str = scan.scanned_at.strftime("%b %d")
+        scans_by_day_map[date_str] += 1
+        if scan.authenticity_score is not None:
+            conf_by_day_map[date_str].append(float(scan.authenticity_score))
+        else:
+            conf_by_day_map[date_str].append(0.0)
+            
+        product_name = "Unknown"
+        if scan.scanned_batch_number and scan.scanned_batch_number != "UNKNOWN":
+            product_name = f"Batch {scan.scanned_batch_number}"
+            # For simplicity, we just use batch number if medicine name isn't readily joined
+            
+        brands_map[product_name] += 1
+
+    scans_by_day = [{"date": k, "count": v} for k, v in list(scans_by_day_map.items())[-7:]]
+    
+    confidence_trend = []
+    for k, v in list(conf_by_day_map.items())[-7:]:
+        avg = sum(v) / len(v) if v else 0
+        confidence_trend.append({"date": k, "avg": round(avg, 2)})
+        
+    top_brands_sorted = sorted(brands_map.items(), key=lambda item: item[1], reverse=True)[:3]
+    top_brands = [{"name": k, "count": v} for k, v in top_brands_sorted]
+
     return {
         "total_scans": total,
         "authentic_count": authentic,
         "suspicious_count": suspicious,
         "fake_count": fake,
         "average_confidence": round(avg_conf, 2),
-        "streak_days": 1 if total > 0 else 0,  # Simplified streak logic
-        "scans_by_day": [],  # Can be expanded later if needed
-        "confidence_trend": [],
-        "top_brands": []
+        "streak_days": 1 if total > 0 else 0,
+        "scans_by_day": scans_by_day,
+        "confidence_trend": confidence_trend,
+        "top_brands": top_brands
     }
 
 @app.delete("/api/v1/history/{history_id}")
